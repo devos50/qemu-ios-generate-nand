@@ -4,6 +4,7 @@
 #include "wmr.h"
 
 #define FTL_CXT_SECTION_SIZE 3
+#define FTL_SPARE_TYPE_CXT_INDEX 0x43
 #define FREE_SECTION_SIZE 20
 #define FREE_LIST_SIZE 3
 #define FTL_READ_REFRESH_LIST_SIZE 5

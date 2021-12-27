@@ -21,8 +21,6 @@ int main(int argc, char *argv[]) {
 	    mkdir("nand", 0700);
 	}
 
-	printf("%d\n", LOG_SECTION_SIZE);
-
 	for(int bank = 0; bank < BANKS; bank++) {
 		printf("Writing bank %d...\n", bank);
 		uint8_t *bank_buf = (uint8_t *) malloc(PAGES_PER_BANK * BYTES_PER_PAGE);
@@ -44,6 +42,24 @@ int main(int argc, char *argv[]) {
 		VFLSpare *vfl_ctx_spare = (VFLSpare *)(bank_spare_buf + 35 * PAGES_PER_BLOCK * BYTES_PER_SPARE);
 		vfl_ctx_spare->dwCxtAge = 1;
 		vfl_ctx_spare->bSpareType = VFL_CTX_SPARE_TYPE;
+
+		// indicate that we have the FTL context on (virtual) block 0
+		vfl_ctx->aFTLCxtVbn[0] = 0;
+
+		// create this FTL context on page 25728
+		FTLCxt2 *ftl_cxt = (FTLCxt2 *)(bank_buf + 25728 * BYTES_PER_PAGE);
+
+		vfl_ctx_spare = (VFLSpare *)(bank_spare_buf + 25728 * BYTES_PER_SPARE);
+		vfl_ctx_spare->bSpareType = FTL_SPARE_TYPE_CXT_INDEX;
+		vfl_ctx_spare->eccMarker = 0xff;
+
+		// create an index block on page 25855 (unknown purpose) and set the right versions
+		vfl_ctx_spare = (VFLSpare *)(bank_spare_buf + 25855 * BYTES_PER_SPARE);
+		vfl_ctx_spare->bSpareType = FTL_SPARE_TYPE_CXT_INDEX;
+
+		FTLMeta *ftl_meta = (FTLMeta *)(bank_buf + 25855 * BYTES_PER_PAGE);
+		ftl_meta->dwVersion = 0x46560000;
+		ftl_meta->dwVersionNot = -0x46560001;
 
 		// write the main storage
 		char *filename = malloc(80);

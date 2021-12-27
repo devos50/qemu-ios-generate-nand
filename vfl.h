@@ -42,6 +42,7 @@ typedef struct
     uint32_t dwReserved;             /* reserved                                       */
     uint8_t cStatusMark;            /* status (confirm) mark - currently not used for anything */
     uint8_t bSpareType;             /* spare type */
+    uint8_t eccMarker;              /* custom */
     /* reserved for main ECC */
 } VFLSpare;
 
