@@ -1,0 +1,11 @@
+#ifndef WMR_H
+#define WMR_H
+
+#define WMR_MAX_RESERVED_SIZE 820
+#define WMR_MAX_VB 18000
+#define WMR_SECTORS_PER_PAGE_MIN 4
+#define WMR_SECTOR_SIZE 512
+#define WMR_MAX_PAGES_PER_BLOCK 0x100
+#define WMR_NUM_OF_BANKS 8
+
+#endif
