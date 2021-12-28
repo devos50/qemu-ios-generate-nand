@@ -12,6 +12,7 @@
 #define PAGES_PER_BLOCK 128
 #define BYTES_PER_SPARE 64
 #define FIL_ID 0x43303032
+#define FTL_CTX_VBLK_IND 2
 
 int main(int argc, char *argv[]) {
 	// create the output dir if it does not exist
@@ -43,23 +44,35 @@ int main(int argc, char *argv[]) {
 		vfl_ctx_spare->dwCxtAge = 1;
 		vfl_ctx_spare->bSpareType = VFL_CTX_SPARE_TYPE;
 
-		// indicate that we have the FTL context on (virtual) block 0
-		vfl_ctx->aFTLCxtVbn[0] = 0;
+		// indicate the location of the FTL CTX block
+		vfl_ctx->aFTLCxtVbn[0] = FTL_CTX_VBLK_IND;
+		vfl_ctx->aFTLCxtVbn[1] = FTL_CTX_VBLK_IND;
+		vfl_ctx->aFTLCxtVbn[2] = FTL_CTX_VBLK_IND;
 
 		// create this FTL context on page 25728
-		FTLCxt2 *ftl_cxt = (FTLCxt2 *)(bank_buf + 25728 * BYTES_PER_PAGE);
+		FTLCxt2 *ftl_cxt = (FTLCxt2 *)(bank_buf + (25728 + FTL_CTX_VBLK_IND * PAGES_PER_BLOCK) * BYTES_PER_PAGE);
 
-		vfl_ctx_spare = (VFLSpare *)(bank_spare_buf + 25728 * BYTES_PER_SPARE);
+		vfl_ctx_spare = (VFLSpare *)(bank_spare_buf + (25728 + FTL_CTX_VBLK_IND * PAGES_PER_BLOCK) * BYTES_PER_SPARE);
 		vfl_ctx_spare->bSpareType = FTL_SPARE_TYPE_CXT_INDEX;
 		vfl_ctx_spare->eccMarker = 0xff;
 
-		// create an index block on page 25855 (unknown purpose) and set the right versions
-		vfl_ctx_spare = (VFLSpare *)(bank_spare_buf + 25855 * BYTES_PER_SPARE);
+		// create an index block on the last page of the FTL Cxt block and embed the right versions
+		vfl_ctx_spare = (VFLSpare *)(bank_spare_buf + (25728 + FTL_CTX_VBLK_IND * PAGES_PER_BLOCK + PAGES_PER_BLOCK - 1) * BYTES_PER_SPARE);
 		vfl_ctx_spare->bSpareType = FTL_SPARE_TYPE_CXT_INDEX;
 
-		FTLMeta *ftl_meta = (FTLMeta *)(bank_buf + 25855 * BYTES_PER_PAGE);
+		FTLMeta *ftl_meta = (FTLMeta *)(bank_buf + (25728 + FTL_CTX_VBLK_IND * PAGES_PER_BLOCK + PAGES_PER_BLOCK - 1) * BYTES_PER_PAGE);
 		ftl_meta->dwVersion = 0x46560000;
 		ftl_meta->dwVersionNot = -0x46560001;
+
+		// write the HFS+ partition to the first page and update the associated spare
+		FILE *hfs_file = fopen("hfs.part", "rb");
+		uint8_t *hfs_buf = (uint8_t *)malloc(BYTES_PER_PAGE);
+		fgets((char *)hfs_buf, BYTES_PER_PAGE, hfs_file);
+		uint8_t *first_page = bank_buf + 25728 * BYTES_PER_PAGE;
+		memcpy(first_page, hfs_buf, BYTES_PER_PAGE);
+
+		VFLSpare *spare = (VFLSpare *)(bank_spare_buf + 25728 * BYTES_PER_SPARE);
+		spare->eccMarker = 0xff;
 
 		// write the main storage
 		char *filename = malloc(80);
