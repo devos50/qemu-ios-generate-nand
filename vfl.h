@@ -38,6 +38,15 @@ typedef struct
 
 typedef struct
 {
+    VFLCxt stVFLCxt;
+    uint8_t abReserved[((BYTES_PER_SECTOR - 3) * sizeof(uint32_t)) - sizeof(VFLCxt)];
+    uint32_t dwVersion;
+    uint32_t dwCheckSum;
+    uint32_t dwXorSum;
+} VFLMeta;
+
+typedef struct
+{
     uint32_t dwCxtAge;               /* context age 0xFFFFFFFF --> 0x0   */
     uint32_t dwReserved;             /* reserved                                       */
     uint8_t cStatusMark;            /* status (confirm) mark - currently not used for anything */

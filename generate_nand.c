@@ -4,17 +4,152 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include "vfl.h"
+ #include <stddef.h>
 
-#define BANKS 1
+#define BANKS 8
 #define BLOCKS_PER_BANK 4096
 #define PAGES_PER_BANK 524288
 #define BYTES_PER_PAGE 2048
+#define PAGES_PER_SUBLOCK 1024
 #define PAGES_PER_BLOCK 128
 #define BYTES_PER_SPARE 64
 #define FIL_ID 0x43303032
 #define FTL_CTX_VBLK_IND 0 // virtual block index of the FTL Context
 
+void get_physical_address(uint32_t vpn, uint32_t *bank, uint32_t *physical_block_index, uint32_t *page_in_block) {
+	*bank = vpn % BANKS;
+	*physical_block_index = vpn / PAGES_PER_SUBLOCK;
+	*page_in_block = (vpn / BANKS) % PAGES_PER_BLOCK;
+}
+
+void write_page(uint8_t *page, uint8_t *spare, int bank, int page_index) {
+	char filename[100];
+	sprintf(filename, "nand/bank%d", bank);
+	struct stat st = {0};
+	if (stat(filename, &st) == -1) {
+	    mkdir(filename, 0700);
+	}
+
+	sprintf(filename, "nand/bank%d/%d.page", bank, page_index);
+	FILE *f = fopen(filename, "wb");
+
+	if(!page) {
+		page = (uint8_t *)calloc(BYTES_PER_PAGE, sizeof(char));
+	}
+	fwrite(page, sizeof(char), BYTES_PER_PAGE, f);
+
+	if(!spare) {
+		spare = (uint8_t *)calloc(BYTES_PER_SPARE, sizeof(char));
+	}
+	fwrite(spare, sizeof(char), BYTES_PER_SPARE, f);
+
+	fclose(f);
+}
+
+void write_fil_id() {
+	// set the FIL ID on the very first byte of the first bank
+	uint8_t *page0_b0 = (uint8_t *)calloc(BYTES_PER_PAGE, sizeof(char));
+	uint8_t *spare_page0_b0 = (uint8_t *)calloc(BYTES_PER_SPARE, sizeof(char));
+	((uint32_t *)page0_b0)[0] = FIL_ID;
+	write_page(page0_b0, spare_page0_b0, 0, 0);
+}
+
+void write_bbts() {
+	// create the bad block table on the first physical page of the last physical block
+	for(int bank = 0; bank < BANKS; bank++) {
+		uint8_t *page = calloc(BYTES_PER_PAGE, sizeof(char));
+		memcpy(page, "DEVICEINFOBBT\0\0\0", 16);
+		write_page(page, NULL, bank, PAGES_PER_BANK - PAGES_PER_BLOCK);
+	}
+}
+
+void write_vfl_context() {
+	for(int bank = 0; bank < BANKS; bank++) {
+		// initialize VFL context block on physical block 35, page 0
+		VFLMeta *vfl_meta = (VFLMeta *)calloc(sizeof(VFLMeta), sizeof(char));
+		vfl_meta->stVFLCxt.awInfoBlk[0] = 35;
+
+		// write the bad mark table
+		for(int i = 0; i < VFL_BAD_MARK_INFO_TABLE_SIZE; i++) {
+			vfl_meta->stVFLCxt.aBadMark[i] = 0xff;
+		}
+
+		VFLSpare *vfl_ctx_spare = (VFLSpare *)calloc(BYTES_PER_SPARE, sizeof(char));
+		vfl_ctx_spare->dwCxtAge = 1;
+		vfl_ctx_spare->bSpareType = VFL_CTX_SPARE_TYPE;
+
+		// indicate the location of the FTL CTX block
+		vfl_meta->stVFLCxt.aFTLCxtVbn[0] = FTL_CTX_VBLK_IND;
+		vfl_meta->stVFLCxt.aFTLCxtVbn[1] = FTL_CTX_VBLK_IND;
+		vfl_meta->stVFLCxt.aFTLCxtVbn[2] = FTL_CTX_VBLK_IND;
+
+		write_page((uint8_t *)vfl_meta, (uint8_t *)vfl_ctx_spare, bank, 35 * PAGES_PER_BLOCK);
+	}
+}
+
+void write_ftl_context() {
+	uint32_t bank, pbi, pib;
+
+	// set the FTL spare type of the first page of the FTL CXT block to indicate that there is a CTX index
+	VFLSpare *vfl_ctx_spare = (VFLSpare *)calloc(BYTES_PER_SPARE, sizeof(char));
+	vfl_ctx_spare->bSpareType = FTL_SPARE_TYPE_CXT_INDEX;
+	vfl_ctx_spare->eccMarker = 0xff;
+	get_physical_address( (FTL_CXT_SECTION_START + FTL_CTX_VBLK_IND) * PAGES_PER_SUBLOCK, &bank, &pbi, &pib);
+	write_page(NULL, (uint8_t *)vfl_ctx_spare, 0, pbi * PAGES_PER_BLOCK + pib);
+
+	// create the FTL Meta page on the last page of the FTL Cxt block and embed the right versions
+	FTLMeta *ftl_meta = (FTLMeta *)calloc(sizeof(FTLMeta), sizeof(char));
+	ftl_meta->dwVersion = 0x46560000;
+	ftl_meta->dwVersionNot = -0x46560001;
+
+	// create empty logs
+	for(int i = 0; i < LOG_SECTION_SIZE + 1; i++) {
+		ftl_meta->stFTLCxt.aLOGCxtTable[i].wVbn = 0xFFFF;
+	}
+
+	// prepare the logical block -> virtual block mapping tables
+	for(int i = 0; i < MAX_NUM_OF_MAP_TABLES; i++) {
+		ftl_meta->stFTLCxt.adwMapTablePtrs[i] = i + 1; // the mapping will start from the 2nd page in the FTL context block
+
+		uint16_t *mapping_page = calloc(BYTES_PER_PAGE / sizeof(uint16_t), sizeof(uint16_t));
+		for(int ind_in_map = 0; ind_in_map < 1024; ind_in_map++) {
+			mapping_page[ind_in_map] = (i * 1024) + ind_in_map + 1;
+		}
+		get_physical_address( FTL_CXT_SECTION_START * PAGES_PER_SUBLOCK + i + 1, &bank, &pbi, &pib);
+		printf("Writing to bank %d and page %d (vp: %d)\n", bank, pbi * PAGES_PER_BLOCK + pib, FTL_CXT_SECTION_START * PAGES_PER_SUBLOCK + i + 1);
+		write_page((uint8_t *)mapping_page, NULL, bank, pbi * PAGES_PER_BLOCK + pib);
+	}
+
+	vfl_ctx_spare = (VFLSpare *)calloc(BYTES_PER_SPARE, sizeof(char));
+	vfl_ctx_spare->bSpareType = FTL_SPARE_TYPE_CXT_INDEX;
+	get_physical_address( (FTL_CXT_SECTION_START + FTL_CTX_VBLK_IND + 1) * PAGES_PER_SUBLOCK - 1, &bank, &pbi, &pib);
+	printf("Writing FTL Meta to virtual page %d\n", (FTL_CXT_SECTION_START + FTL_CTX_VBLK_IND + 1) * PAGES_PER_SUBLOCK - 1);
+	write_page((uint8_t *)ftl_meta, (uint8_t *)vfl_ctx_spare, bank, pbi * PAGES_PER_BLOCK + pib);
+}
+
+void write_hfs_partition() {
+	// write the HFS+ partition to the first page and update the associated spare
+	uint32_t bank, pbi, pib;
+	FILE *hfs_file = fopen("hfs.part", "rb");
+	fseek(hfs_file, 0L, SEEK_END);
+	int partition_size = ftell(hfs_file);
+	fclose(hfs_file);
+
+	hfs_file = fopen("hfs.part", "rb");
+	for(int i = 0; i < partition_size / BYTES_PER_PAGE; i++) {
+		uint8_t *page = malloc(BYTES_PER_PAGE);
+		fread(page, BYTES_PER_PAGE, sizeof(uint8_t), hfs_file);
+		VFLSpare *spare = (VFLSpare *)calloc(BYTES_PER_SPARE, sizeof(char));
+		spare->eccMarker = 0xff;
+		get_physical_address((FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + i, &bank, &pbi, &pib);
+		printf("Writing HFS partition offset %d to virtual page %d (writing to bank %d, page %d)\n", i * BYTES_PER_PAGE, (FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + i, bank, pbi * PAGES_PER_BLOCK + pib);
+		write_page(page, (uint8_t *)spare, bank, pbi * PAGES_PER_BLOCK + pib);
+	}
+	fclose(hfs_file);
+}
+
 int main(int argc, char *argv[]) {
+
 	// create the output dir if it does not exist
 	struct stat st = {0};
 
@@ -22,82 +157,9 @@ int main(int argc, char *argv[]) {
 	    mkdir("nand", 0700);
 	}
 
-	for(int bank = 0; bank < BANKS; bank++) {
-		printf("Writing bank %d...\n", bank);
-		uint8_t *bank_buf = (uint8_t *) malloc(PAGES_PER_BANK * BYTES_PER_PAGE);
-		uint8_t *bank_spare_buf = (uint8_t *) malloc(PAGES_PER_BANK * BYTES_PER_SPARE);
-
-		// set the FIL ID on the very first byte of the first bank
-		((uint32_t *)bank_buf)[0] = FIL_ID;
-
-		// create the bad block table
-		uint64_t bbt_offset = PAGES_PER_BANK * BYTES_PER_PAGE - (PAGES_PER_BLOCK * BYTES_PER_PAGE);
-		memcpy(bank_buf + bbt_offset, "DEVICEINFOBBT\0\0\0", 16);
-		
-		// initialize VFL context block on physical block 35, page 0
-		VFLCxt *vfl_ctx = (VFLCxt *)(bank_buf + 35 * PAGES_PER_BLOCK * BYTES_PER_PAGE);
-		vfl_ctx->awInfoBlk[0] = 35;
-
-		// write the bad mark table
-		for(int i = 0; i < VFL_BAD_MARK_INFO_TABLE_SIZE; i++) {
-			vfl_ctx->aBadMark[i] = 0xff;
-		}
-
-		VFLSpare *vfl_ctx_spare = (VFLSpare *)(bank_spare_buf + 35 * PAGES_PER_BLOCK * BYTES_PER_SPARE);
-		vfl_ctx_spare->dwCxtAge = 1;
-		vfl_ctx_spare->bSpareType = VFL_CTX_SPARE_TYPE;
-
-		// indicate the location of the FTL CTX block
-		vfl_ctx->aFTLCxtVbn[0] = FTL_CTX_VBLK_IND;
-		vfl_ctx->aFTLCxtVbn[1] = FTL_CTX_VBLK_IND;
-		vfl_ctx->aFTLCxtVbn[2] = FTL_CTX_VBLK_IND;
-
-		// set the FTL spare type of the first page of the FTL CXT block to indicate that there is a CTX index
-		vfl_ctx_spare = (VFLSpare *)(bank_spare_buf + (25728 + FTL_CTX_VBLK_IND * PAGES_PER_BLOCK) * BYTES_PER_SPARE);
-		vfl_ctx_spare->bSpareType = FTL_SPARE_TYPE_CXT_INDEX;
-		vfl_ctx_spare->eccMarker = 0xff;
-
-		// create the FTL Meta page on the last page of the FTL Cxt block and embed the right versions
-		vfl_ctx_spare = (VFLSpare *)(bank_spare_buf + (25728 + FTL_CTX_VBLK_IND * PAGES_PER_BLOCK + PAGES_PER_BLOCK - 1) * BYTES_PER_SPARE);
-		vfl_ctx_spare->bSpareType = FTL_SPARE_TYPE_CXT_INDEX;
-
-		FTLMeta *ftl_meta = (FTLMeta *)(bank_buf + (25728 + FTL_CTX_VBLK_IND * PAGES_PER_BLOCK + PAGES_PER_BLOCK - 1) * BYTES_PER_PAGE);
-		ftl_meta->dwVersion = 0x46560000;
-		ftl_meta->dwVersionNot = -0x46560001;
-
-		// prepare the logical block -> virtual block mapping tables
-		for(int i = 0; i < MAX_NUM_OF_MAP_TABLES; i++) {
-			ftl_meta->stFTLCxt.adwMapTablePtrs[i] = i;
-		}
-
-		for(uint16_t block_nr = 0; block_nr < 4096; block_nr++) { // TODO this should be increased!!!!!
-			int bytes_offset = 25728 * BYTES_PER_PAGE;
-			uint16_t *arr = (uint16_t *)(bank_buf + bytes_offset);
-			arr[block_nr] = block_nr + 1;
-		}
-		
-		// write the HFS+ partition to the first page and update the associated spare
-		// FILE *hfs_file = fopen("hfs.part", "rb");
-		// uint8_t *hfs_buf = (uint8_t *)malloc(BYTES_PER_PAGE);
-		// fgets((char *)hfs_buf, BYTES_PER_PAGE, hfs_file);
-		// uint8_t *first_page = bank_buf + 25728 * BYTES_PER_PAGE;
-		// memcpy(first_page, hfs_buf, BYTES_PER_PAGE);
-
-		VFLSpare *spare = (VFLSpare *)(bank_spare_buf + 25728 * BYTES_PER_SPARE);
-		spare->eccMarker = 0xff;
-
-		// write the main storage
-		char *filename = malloc(80);
-		sprintf(filename, "nand/bank%d", bank);
-		FILE *f = fopen(filename, "wb");
-		fwrite(bank_buf, sizeof(char), PAGES_PER_BANK * BYTES_PER_PAGE, f);
-		fclose(f);
-
-		// write the spare area
-		printf("Writing spare of bank %d...\n", bank);
-		sprintf(filename, "nand/bank%d_spare", bank);
-		f = fopen(filename, "wb");
-		fwrite(bank_spare_buf, sizeof(char), PAGES_PER_BANK * BYTES_PER_SPARE, f);
-		fclose(f);
-	}
+	write_fil_id();
+	write_bbts();
+	write_vfl_context();
+	write_ftl_context();
+	write_hfs_partition();
 }

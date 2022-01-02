@@ -13,13 +13,14 @@
 #define MAX_NUM_OF_MAP_TABLES  (WMR_MAX_VB / (WMR_SECTORS_PER_PAGE_MIN * WMR_SECTOR_SIZE) + (WMR_MAX_VB % (WMR_SECTORS_PER_PAGE_MIN * WMR_SECTOR_SIZE) ? 1 : 0)) * (sizeof(uint16_t))
 #define MAX_NUM_OF_EC_TABLES   (WMR_MAX_VB / (WMR_SECTORS_PER_PAGE_MIN * WMR_SECTOR_SIZE) + (WMR_MAX_VB % (WMR_SECTORS_PER_PAGE_MIN * WMR_SECTOR_SIZE) ? 1 : 0)) * (sizeof(uint32_t))
 #define MAX_NUM_OF_LOGCXT_MAPS (((LOG_SECTION_SIZE * WMR_MAX_PAGES_PER_BLOCK * WMR_NUM_OF_BANKS * sizeof(uint16_t)) / (WMR_SECTOR_SIZE * WMR_SECTORS_PER_PAGE_MIN)) + (((LOG_SECTION_SIZE * WMR_MAX_PAGES_PER_BLOCK * WMR_NUM_OF_BANKS * sizeof(uint16_t)) % (WMR_SECTOR_SIZE * WMR_SECTORS_PER_PAGE_MIN)) ? 1 : 0))
+#define FTL_CXT_SECTION_START 201
 
-typedef struct
+typedef struct __attribute__((__packed__))
 {
     uint32_t dwLogAge;          /* log age - uses a global counter starting from 0 */
     uint16_t wVbn;              /* the virtual block number of log block */
     uint16_t wLbn;              /* the logical block number of log block */
-    uint16_t      *paPOffsetL2P; /* L2P page offset mapping table          *//* size - PAGES_PER_SUBLK * sizeof(UInt16) functionality - maps pages of a logical block inside the block */
+    uint32_t paPOffsetL2P; /* L2P page offset mapping table          *//* size - PAGES_PER_SUBLK * sizeof(UInt16) functionality - maps pages of a logical block inside the block */
     uint16_t wFreePOffset; /* free page offset in log block                *//* the next physical page to write to */
     uint16_t wNumOfValidLP; /* the number of valid page                            *//* the number of valid pages in the log - stay the same when rewriting a page */
     uint32_t boolCopyMerge; /* can be copymerged or not                            *//* ??? */
@@ -48,9 +49,9 @@ typedef struct
     uint32_t adwECTablePtrs[MAX_NUM_OF_EC_TABLES]; /* page address of the Erase Counter table */
     uint32_t adwLOGCxtMapPtrs[MAX_NUM_OF_LOGCXT_MAPS]; /* page address of the LOGCxt map table */
 
-    uint16_t *     pawMapTable; /* cached map table logical blocks to virtual blocks - value will be recalculated in FTL_Init */
-    uint16_t *     pawECCacheTable;  /* cached Erase counter table - value will be recalculated in FTL_Init - data is recovered from the last valid Erase Map in case of power failure */
-    uint16_t *     pawLOGCxtMapTable;  /* pointer to the map of the logs - this is a pointer and will be calculated in the Init - data can be restored if the info is flushed */
+    uint32_t     pawMapTable; /* cached map table logical blocks to virtual blocks - value will be recalculated in FTL_Init */
+    uint32_t     pawECCacheTable;  /* cached Erase counter table - value will be recalculated in FTL_Init - data is recovered from the last valid Erase Map in case of power failure */
+    uint32_t     pawLOGCxtMapTable;  /* pointer to the map of the logs - this is a pointer and will be calculated in the Init - data can be restored if the info is flushed */
     LOGCxt aLOGCxtTable[LOG_SECTION_SIZE + 1]; /* LOGCxt array */
 
     uint32_t dwMetaWearLevelCounter; /* used to decide whether the index info super blocks need to be replaced or not (slows down VFL Cxt blocks wear) */
@@ -63,7 +64,7 @@ typedef struct
 
     // this code was added Apr 4th 2007
     uint32_t adwRCTablePtrs[MAX_NUM_OF_EC_TABLES]; /* page address of the Read Counter table */
-    uint16_t *     pawRCCacheTable;  /* cached Erase counter table - value will be recalculated in FTL_Init - data is recovered from the last valid Erase Map in case of power failure */
+    uint32_t     pawRCCacheTable;  /* cached Erase counter table - value will be recalculated in FTL_Init - data is recovered from the last valid Erase Map in case of power failure */
     FTLReadRefreshStruct aFTLReadRefreshList[FTL_READ_REFRESH_LIST_SIZE];
     uint32_t dwRefreshListIdx;
     uint32_t dwReadsSinceLastRefreshMark;
