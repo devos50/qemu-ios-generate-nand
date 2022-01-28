@@ -3,8 +3,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <stddef.h>
 #include "vfl.h"
- #include <stddef.h>
+#include "mbr.h"
+#include "gpt.h"
 
 #define BANKS 8
 #define BLOCKS_PER_BANK 4096
@@ -15,6 +17,51 @@
 #define BYTES_PER_SPARE 64
 #define FIL_ID 0x43303032
 #define FTL_CTX_VBLK_IND 0 // virtual block index of the FTL Context
+
+#define BOOT_PARTITION_FIRST_PAGE 3
+
+static uint32_t crc32_table[256];
+static int crc32_table_computed = 0;
+
+/*
+CRC32 logic
+*/
+static void make_crc32_table(void)
+{
+    uint32_t c;
+    int n, k;
+
+    for (n = 0; n < 256; n++) {
+            c = (uint32_t) n;
+            for (k = 0; k < 8; k++) {
+                    if (c & 1)
+                            c = 0xedb88320L ^ (c >> 1);
+                    else
+                            c = c >> 1;
+            }
+            crc32_table[n] = c;
+    }
+    crc32_table_computed = 1;
+}
+
+uint32_t update_crc32(uint32_t crc, const uint8_t *buf,
+                         int len)
+{
+    uint32_t c = crc;
+    int n;
+
+    if (!crc32_table_computed)
+            make_crc32_table();
+    for (n = 0; n < len; n++) {
+            c = crc32_table[(c ^ buf[n]) & 0xff] ^ (c >> 8);
+    }
+    return c;
+}
+
+uint32_t crc32(const uint8_t *buf, int len)
+{
+    return update_crc32(0xffffffffL, buf, len) ^ 0xffffffffL;
+}
 
 void get_physical_address(uint32_t vpn, uint32_t *bank, uint32_t *physical_block_index, uint32_t *page_in_block) {
 	*bank = vpn % BANKS;
@@ -127,7 +174,7 @@ void write_ftl_context() {
 	write_page((uint8_t *)ftl_meta, (uint8_t *)vfl_ctx_spare, bank, pbi * PAGES_PER_BLOCK + pib);
 }
 
-void write_hfs_partition() {
+uint32_t write_hfs_partition(uint32_t page_offset) {
 	// write the HFS+ partition to the first page and update the associated spare
 	uint32_t bank, pbi, pib;
 	FILE *hfs_file = fopen("hfs.part", "rb");
@@ -141,11 +188,74 @@ void write_hfs_partition() {
 		fread(page, BYTES_PER_PAGE, sizeof(uint8_t), hfs_file);
 		VFLSpare *spare = (VFLSpare *)calloc(BYTES_PER_SPARE, sizeof(char));
 		spare->eccMarker = 0xff;
-		get_physical_address((FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + i, &bank, &pbi, &pib);
-		printf("Writing HFS partition offset %d to virtual page %d (writing to bank %d, page %d)\n", i * BYTES_PER_PAGE, (FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + i, bank, pbi * PAGES_PER_BLOCK + pib);
+		get_physical_address((FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + i + page_offset, &bank, &pbi, &pib);
+		printf("Writing HFS partition offset %d to virtual page %d (writing to bank %d, page %d)\n", i * BYTES_PER_PAGE, (FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + i + page_offset, bank, pbi * PAGES_PER_BLOCK + pib);
 		write_page(page, (uint8_t *)spare, bank, pbi * PAGES_PER_BLOCK + pib);
 	}
 	fclose(hfs_file);
+
+	return partition_size / BYTES_PER_PAGE;
+}
+
+void write_mbr() {
+	uint32_t bank, pbi, pib;
+
+	// write the MBR bytes (LBA 0)
+	uint8_t *mbr_page = malloc(BYTES_PER_PAGE);
+	get_physical_address((FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK, &bank, &pbi, &pib);
+	struct mbr_partition *mbr = (struct mbr_partition *)(mbr_page + MBR_ADDRESS);
+	mbr->sysid = 0xEE;
+	mbr->startlba = 0x3; // offset of the partition
+	mbr->size = 0x2ce7;
+	mbr_page[510] = 0x55;
+	mbr_page[511] = 0xAA;
+
+	VFLSpare *spare = (VFLSpare *)calloc(BYTES_PER_SPARE, sizeof(char));
+	spare->eccMarker = 0xff;
+
+	write_page(mbr_page, (uint8_t *)spare, bank, pbi * PAGES_PER_BLOCK + pib);
+}
+
+void write_filesystem() {
+	int pages_for_partition = write_hfs_partition(BOOT_PARTITION_FIRST_PAGE);
+
+	write_mbr();
+
+	// initialize the EFI header (LBA 1)
+	uint32_t bank, pbi, pib;
+	uint8_t *gpt_header_page = malloc(BYTES_PER_PAGE);
+	gpt_hdr *gpt_header = (gpt_hdr *)gpt_header_page;
+
+	VFLSpare *spare = (VFLSpare *)calloc(BYTES_PER_SPARE, sizeof(char));
+	spare->eccMarker = 0xff;
+
+	// create the partition entries (LBA 2)
+	uint8_t *gpt_entry_boot_partition_page = malloc(BYTES_PER_PAGE);
+	gpt_ent *gpt_entry_boot_partition = (gpt_ent *)gpt_entry_boot_partition_page;
+	gpt_entry_boot_partition->ent_type[0] = 0x48465300;
+	gpt_entry_boot_partition->ent_type[1] = 0x11AA0000;
+	gpt_entry_boot_partition->ent_type[2] = 0x300011AA;
+	gpt_entry_boot_partition->ent_type[3] = 0xACEC4365;
+	gpt_entry_boot_partition->ent_lba_start = BOOT_PARTITION_FIRST_PAGE;
+	gpt_entry_boot_partition->ent_lba_end = BOOT_PARTITION_FIRST_PAGE + pages_for_partition;
+
+	get_physical_address((FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + 2, &bank, &pbi, &pib);
+	write_page(gpt_entry_boot_partition_page, (uint8_t *)spare, bank, pbi * PAGES_PER_BLOCK + pib);
+
+	// finalize the GPT header
+	memcpy(gpt_header, GPT_HDR_SIG, 8);
+	gpt_header->hdr_revision = GPT_HDR_REVISION;
+	gpt_header->hdr_size = 0x5C; // 92 bytes
+	gpt_header->hdr_lba_table = 2;
+	gpt_header->hdr_entries = 1;
+	gpt_header->hdr_entsz = 0x80;
+	gpt_header->hdr_crc_table = crc32(gpt_entry_boot_partition_page, sizeof(gpt_ent));
+	gpt_header->hdr_crc_self = crc32((uint8_t *)gpt_header, 0x5C);
+
+	get_physical_address((FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + 1, &bank, &pbi, &pib);
+	write_page(gpt_header_page, (uint8_t *)spare, bank, pbi * PAGES_PER_BLOCK + pib);
+
+	printf("%d\n", sizeof(gpt_ent));
 }
 
 int main(int argc, char *argv[]) {
@@ -161,5 +271,5 @@ int main(int argc, char *argv[]) {
 	write_bbts();
 	write_vfl_context();
 	write_ftl_context();
-	write_hfs_partition();
+	write_filesystem();
 }
