@@ -18,7 +18,8 @@
 #define FIL_ID 0x43303032
 #define FTL_CTX_VBLK_IND 0 // virtual block index of the FTL Context
 
-#define BOOT_PARTITION_FIRST_PAGE 3
+#define NUM_PARTITIONS 2
+#define BOOT_PARTITION_FIRST_PAGE (NUM_PARTITIONS + 2)  // first two LBAs are for MBR and GUID header
 
 static uint32_t crc32_table[256];
 static int crc32_table_computed = 0;
@@ -149,6 +150,12 @@ void write_ftl_context() {
 	ftl_meta->dwVersion = 0x46560000;
 	ftl_meta->dwVersionNot = -0x46560001;
 
+	// initialize the number of empty VBs for logs and the free areas
+	ftl_meta->stFTLCxt.wNumOfFreeVb = FREE_SECTION_SIZE;
+	for(int i = 0; i < FREE_SECTION_SIZE; i++) {
+		ftl_meta->stFTLCxt.awFreeVbList[i] = FREE_SECTION_START + i;
+	}
+
 	// create empty logs
 	for(int i = 0; i < LOG_SECTION_SIZE + 1; i++) {
 		ftl_meta->stFTLCxt.aLOGCxtTable[i].wVbn = 0xFFFF;
@@ -163,7 +170,7 @@ void write_ftl_context() {
 			mapping_page[ind_in_map] = (i * 1024) + ind_in_map + 1;
 		}
 		get_physical_address( FTL_CXT_SECTION_START * PAGES_PER_SUBLOCK + i + 1, &bank, &pbi, &pib);
-		printf("Writing to bank %d and page %d (vp: %d)\n", bank, pbi * PAGES_PER_BLOCK + pib, FTL_CXT_SECTION_START * PAGES_PER_SUBLOCK + i + 1);
+		//printf("Writing to bank %d and page %d (vp: %d)\n", bank, pbi * PAGES_PER_BLOCK + pib, FTL_CXT_SECTION_START * PAGES_PER_SUBLOCK + i + 1);
 		write_page((uint8_t *)mapping_page, NULL, bank, pbi * PAGES_PER_BLOCK + pib);
 	}
 
@@ -174,22 +181,24 @@ void write_ftl_context() {
 	write_page((uint8_t *)ftl_meta, (uint8_t *)vfl_ctx_spare, bank, pbi * PAGES_PER_BLOCK + pib);
 }
 
-uint32_t write_hfs_partition(uint32_t page_offset) {
+uint32_t write_hfs_partition(char *filename, uint32_t page_offset) {
 	// write the HFS+ partition to the first page and update the associated spare
 	uint32_t bank, pbi, pib;
-	FILE *hfs_file = fopen("hfs.part", "rb");
+	FILE *hfs_file = fopen(filename, "rb");
 	fseek(hfs_file, 0L, SEEK_END);
 	int partition_size = ftell(hfs_file);
 	fclose(hfs_file);
 
-	hfs_file = fopen("hfs.part", "rb");
+	hfs_file = fopen(filename, "rb");
 	for(int i = 0; i < partition_size / BYTES_PER_PAGE; i++) {
 		uint8_t *page = malloc(BYTES_PER_PAGE);
 		fread(page, BYTES_PER_PAGE, sizeof(uint8_t), hfs_file);
 		VFLSpare *spare = (VFLSpare *)calloc(BYTES_PER_SPARE, sizeof(char));
 		spare->eccMarker = 0xff;
 		get_physical_address((FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + i + page_offset, &bank, &pbi, &pib);
-		printf("Writing HFS partition offset %d to virtual page %d (writing to bank %d, page %d)\n", i * BYTES_PER_PAGE, (FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + i + page_offset, bank, pbi * PAGES_PER_BLOCK + pib);
+		if(i == 0) {
+			printf("Writing HFS partition offset %d to virtual page %d (writing to bank %d, page %d)\n", i * BYTES_PER_PAGE, (FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + i + page_offset, bank, pbi * PAGES_PER_BLOCK + pib);
+		}
 		write_page(page, (uint8_t *)spare, bank, pbi * PAGES_PER_BLOCK + pib);
 	}
 	fclose(hfs_file);
@@ -197,29 +206,37 @@ uint32_t write_hfs_partition(uint32_t page_offset) {
 	return partition_size / BYTES_PER_PAGE;
 }
 
-void write_mbr() {
+void write_mbr(int boot_partition_size, int filesystem_partition_offset, int filesystem_partition_size) {
 	uint32_t bank, pbi, pib;
 
 	// write the MBR bytes (LBA 0)
 	uint8_t *mbr_page = malloc(BYTES_PER_PAGE);
 	get_physical_address((FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK, &bank, &pbi, &pib);
-	struct mbr_partition *mbr = (struct mbr_partition *)(mbr_page + MBR_ADDRESS);
-	mbr->sysid = 0xEE;
-	mbr->startlba = 0x3; // offset of the partition
-	mbr->size = 0x2ce7;
+	struct mbr_partition *boot_partition = (struct mbr_partition *)(mbr_page + MBR_ADDRESS);
+	boot_partition->sysid = 0xEE;
+	boot_partition->startlba = BOOT_PARTITION_FIRST_PAGE;
+	boot_partition->size = boot_partition_size;
+
+	struct mbr_partition *filesystem_partition = (struct mbr_partition *)(mbr_page + MBR_ADDRESS + sizeof(struct mbr_partition));
+	filesystem_partition->sysid = 0xEE;
+	filesystem_partition->startlba = filesystem_partition_offset;
+	filesystem_partition->size = filesystem_partition_size;
+
 	mbr_page[510] = 0x55;
 	mbr_page[511] = 0xAA;
 
 	VFLSpare *spare = (VFLSpare *)calloc(BYTES_PER_SPARE, sizeof(char));
 	spare->eccMarker = 0xff;
 
+	printf("Writing MBR to page %d, bank %d\n", pbi * PAGES_PER_BLOCK + pib, bank);
 	write_page(mbr_page, (uint8_t *)spare, bank, pbi * PAGES_PER_BLOCK + pib);
 }
 
 void write_filesystem() {
-	int pages_for_partition = write_hfs_partition(BOOT_PARTITION_FIRST_PAGE);
-
-	write_mbr();
+	int pages_for_boot_partition = write_hfs_partition("boot.part", BOOT_PARTITION_FIRST_PAGE);
+	printf("Required pages for boot partition: %d\n", pages_for_boot_partition);
+	int pages_for_filesystem_partition = write_hfs_partition("filesystem_full.part", BOOT_PARTITION_FIRST_PAGE + pages_for_boot_partition + 1);
+	printf("Required pages for filesystem partition: %d\n", pages_for_filesystem_partition);
 
 	// initialize the EFI header (LBA 1)
 	uint32_t bank, pbi, pib;
@@ -229,7 +246,7 @@ void write_filesystem() {
 	VFLSpare *spare = (VFLSpare *)calloc(BYTES_PER_SPARE, sizeof(char));
 	spare->eccMarker = 0xff;
 
-	// create the partition entries (LBA 2)
+	// create the boot partition entry (LBA 2)
 	uint8_t *gpt_entry_boot_partition_page = malloc(BYTES_PER_PAGE);
 	gpt_ent *gpt_entry_boot_partition = (gpt_ent *)gpt_entry_boot_partition_page;
 	gpt_entry_boot_partition->ent_type[0] = 0x48465300;
@@ -237,25 +254,44 @@ void write_filesystem() {
 	gpt_entry_boot_partition->ent_type[2] = 0x300011AA;
 	gpt_entry_boot_partition->ent_type[3] = 0xACEC4365;
 	gpt_entry_boot_partition->ent_lba_start = BOOT_PARTITION_FIRST_PAGE;
-	gpt_entry_boot_partition->ent_lba_end = BOOT_PARTITION_FIRST_PAGE + pages_for_partition;
+	gpt_entry_boot_partition->ent_lba_end = BOOT_PARTITION_FIRST_PAGE + pages_for_boot_partition;
+	printf("Boot system partition located on page %lld - %lld\n", gpt_entry_boot_partition->ent_lba_start, gpt_entry_boot_partition->ent_lba_end);
 
 	get_physical_address((FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + 2, &bank, &pbi, &pib);
+	printf("Writing GUID boot partition entry to page %d, bank %d\n", pbi * PAGES_PER_BLOCK + pib, bank);
 	write_page(gpt_entry_boot_partition_page, (uint8_t *)spare, bank, pbi * PAGES_PER_BLOCK + pib);
+
+	// create the file system partition entry (LBA 3)
+	uint8_t *gpt_entry_filesystem_partition_page = malloc(BYTES_PER_PAGE);
+	gpt_ent *gpt_entry_filesystem_partition = (gpt_ent *)gpt_entry_filesystem_partition_page;
+	gpt_entry_filesystem_partition->ent_type[0] = 0x48465300;
+	gpt_entry_filesystem_partition->ent_type[1] = 0x11AA0000;
+	gpt_entry_filesystem_partition->ent_type[2] = 0x300011AA;
+	gpt_entry_filesystem_partition->ent_type[3] = 0xACEC4365;
+	gpt_entry_filesystem_partition->ent_lba_start = BOOT_PARTITION_FIRST_PAGE + pages_for_boot_partition + 1;
+	gpt_entry_filesystem_partition->ent_lba_end = gpt_entry_filesystem_partition->ent_lba_start + pages_for_filesystem_partition;
+	printf("File system partition located on page %lld - %lld\n", gpt_entry_filesystem_partition->ent_lba_start, gpt_entry_filesystem_partition->ent_lba_end);
+
+	get_physical_address((FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + 3, &bank, &pbi, &pib);
+	printf("Writing GUID filesystem partition entry to page %d, bank %d\n", pbi * PAGES_PER_BLOCK + pib, bank);
+	write_page(gpt_entry_filesystem_partition_page, (uint8_t *)spare, bank, pbi * PAGES_PER_BLOCK + pib);
 
 	// finalize the GPT header
 	memcpy(gpt_header, GPT_HDR_SIG, 8);
 	gpt_header->hdr_revision = GPT_HDR_REVISION;
 	gpt_header->hdr_size = 0x5C; // 92 bytes
 	gpt_header->hdr_lba_table = 2;
-	gpt_header->hdr_entries = 1;
+	gpt_header->hdr_entries = 2;
 	gpt_header->hdr_entsz = 0x80;
 	gpt_header->hdr_crc_table = crc32(gpt_entry_boot_partition_page, sizeof(gpt_ent));
 	gpt_header->hdr_crc_self = crc32((uint8_t *)gpt_header, 0x5C);
 
 	get_physical_address((FTL_CXT_SECTION_START + 1) * PAGES_PER_SUBLOCK + 1, &bank, &pbi, &pib);
+	printf("Writing GUID header to page %d, bank %d\n", pbi * PAGES_PER_BLOCK + pib, bank);
 	write_page(gpt_header_page, (uint8_t *)spare, bank, pbi * PAGES_PER_BLOCK + pib);
 
-	printf("%d\n", sizeof(gpt_ent));
+	// finally, write the MBR
+	write_mbr(pages_for_boot_partition, BOOT_PARTITION_FIRST_PAGE + pages_for_boot_partition + 1, pages_for_filesystem_partition);
 }
 
 int main(int argc, char *argv[]) {
