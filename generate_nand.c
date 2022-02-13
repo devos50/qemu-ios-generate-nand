@@ -277,6 +277,7 @@ void write_filesystem() {
 	// write_page(gpt_entry_filesystem_partition_page, (uint8_t *)spare, bank, pbi * PAGES_PER_BLOCK + pib);
 
 	// finalize the GPT header
+	// TODO add the secondary GPT entry!
 	memcpy(gpt_header, GPT_HDR_SIG, 8);
 	gpt_header->hdr_revision = GPT_HDR_REVISION;
 	gpt_header->hdr_size = 0x5C; // 92 bytes
