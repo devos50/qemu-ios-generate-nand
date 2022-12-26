@@ -2,6 +2,7 @@
 #define FTL_H
 
 #include "wmr.h"
+#include <stdint.h>
 
 #define FTL_CXT_SECTION_SIZE 3
 #define FTL_SPARE_TYPE_CXT_INDEX 0x43
