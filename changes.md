@@ -34,6 +34,16 @@ Now run `sudo plutil -convert binary1 com.apple.SpringBoard.plist`<br>
 Now delete all `.plist` files except for <br> `com.apple.AddressBook.plist` <br> `com.apple.CommCenter.plist` <br> `com.apple.configd.plist` <br> `com.apple.mobile.lockdown.plist` <br>
 `com.apple.notifyd.plist` <br> `com.apple.SpringBoard.plist`
 
-Eject the disk and the patches are all appplied and the program can be used as normal!
+Eject the disk and the patches are all appplied.
+
+## Creating filesystem-readonly.img
+
+Obtain a copy of `dmg2img` via MacPorts or Homebrew. <br>
+Run `hdiutil convert -format UDRO -o filesystem-readonly.dmg  filesystem-writable.dmg`
+`Run dmg2img filesystem-readonly.dmg`
+
+<b>The file filesystem-readonly.dmg can now be used with generate-nand<b>
+
+
 
 
