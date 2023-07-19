@@ -1,6 +1,7 @@
 # Changes that need to be made to 022-3601-4.dmg
 ## Decrypting the rootfs dmg
 The first step is to extract the dmg, this is done using xpwntool's version of `dmg` <br>
+Run `git submodule update --init` <br>
 `cd` into the xpwn directory (<b>you must use this version</b> as it has a simple patch to enable the program to compile) <br>
 then run `mdkir compile && cd compile` <br>
 `cmake .. && make` <br>
