@@ -1,6 +1,6 @@
 # generate-ipod-touch-1g-nand
 ## Usage:
-Copy filesystem-readonly.img this directory <br>
+Copy filesystem-readonly.img to this directory <br>
 `gcc generate_nand.c -o generate_nand` <br>
 `./generate-nand`
 This generates a nand folder which can be used with qemu. <br>
