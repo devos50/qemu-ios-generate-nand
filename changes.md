@@ -12,25 +12,24 @@ This generates a writable rootfs which we will modify to enable booting on qemu
 
 ## Patching the filesystem
 Double click filesystem-writable.dmg to mount it in Finder <br><br>
-Click on the volume name that just appeared and navigate to `private/etc/` <br>
-Open the file `fstab` in the text editor and <b>delete the second line</b>, then change `ro` to `rw` in the first line. <br>
+`cd` to `/Volumes/Snowbird3A101a.N45Bundle/private/etc/` <br>
+Open the file `fstab` with `sudo nano fstab` and <b>delete the second line</b>, then change `ro` to `rw` in the first line., then press `ctrl+x` and then `enter` <br>
 
-Navigate to `private/var/root` and create the folders `AddressBook`, `Lockdown` and `Preferences`. <br>
+Navigate to `private/var/root/Library` and create the folders `AddressBook`, `Lockdown` and `Preferences`. <br>
 Inside the folder `AddressBook` copy `AddressBook.sqlitedb` from the `resources` folder. <br>
 Now go to the `Lockdown` folder which was created earlier and paste `data_ark.plist` from the `resources` folder. <br>
 Then create a folder called activation_records and paste `pod_record.plist` from the `resources` folder. <br>
 In the `Preferences` folder paste `com.apple.springboard.plist`. <br><br>
 
 Go to `System/Library/LaunchDaemons/` now run the command `sudo plutil -convert xml1 com.apple.SpringBoard.plist` <br>
-Run `sudo open com.apple.SpringBoard.plist` which should open it in an editor, under the first `<dict>` paste the following text <br>
-` <key>EnvironmentVariables</key>` <br>
-`        <dict>` <br>
-`                <key>LK_ENABLE_MBX2D</key>` <br>
-`                <string>0</string>` <br>
-`        </dict>` <br>
-`</key>` <br><br>
+Run `sudo nano com.apple.SpringBoard.plist` which should open it in an editor, under the first `<dict>` paste the following text <br>
+`<key>EnvironmentVariables</key>` <br>
+`<dict>` <br>
+`  <key>LK_ENABLE_MBX2D</key>` <br>
+`  <string>0</string>` <br>
+`</dict>` <br><br>
 
-then save and close it.
+then save with `ctrl+x` and then `enter` and close it.
 Now run `sudo plutil -convert binary1 com.apple.SpringBoard.plist`<br>
 Now delete all `.plist` files except for <br> `com.apple.AddressBook.plist` <br> `com.apple.CommCenter.plist` <br> `com.apple.configd.plist` <br> `com.apple.mobile.lockdown.plist` <br>
 `com.apple.notifyd.plist` <br> `com.apple.SpringBoard.plist`
