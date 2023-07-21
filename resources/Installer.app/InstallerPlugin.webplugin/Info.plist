@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleExecutable</key>
+	<string>InstallerPlugin</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.nullriver.iphone.InstallerPlugin</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>InstallerPlugin</string>
+	<key>CFBundlePackageType</key>
+	<string>WBPL</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>1.2</string>
+	<key>NSPrincipalClass</key>
+	<string>InstallerPlugin</string>
+	<key>WebPluginDescription</key>
+	<string>AppTapp Installer Safari Plug-in</string>
+	<key>WebPluginMIMETypes</key>
+	<dict>
+		<key>application/x-apptapp-repository</key>
+		<dict>
+			<key>WebPluginExtensions</key>
+			<array>
+				<string>plist</string>
+			</array>
+			<key>WebPluginTypeDescription</key>
+			<string>AppTapp Repository</string>
+			<key>WebPluginTypeEnabled</key>
+			<true/>
+		</dict>
+	</dict>
+	<key>WebPluginName</key>
+	<string>AppTapp Installer</string>
+</dict>
+</plist>
