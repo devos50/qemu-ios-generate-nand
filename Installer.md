@@ -36,5 +36,7 @@ Well... not much right now! It just gives you installer.app on your home screen 
 and they will show up and be able to run too. I'm planning on making something like Installer in the future where you can select a local pxl and it will unpack and install it. Right now 
 installer can't be used properly due to the fact the emulator doesn't have any support for networking (but I have tested several pxl apps and they work just fine!
 
+<img width="346" alt="Screenshot 2023-07-21 at 20 05 42" src="https://github.com/zoe-vb/generate-ipod-touch-1g-nand/assets/96234996/bed2c42e-2f34-4c5e-a013-ac650dd2de88">
+
 
 
