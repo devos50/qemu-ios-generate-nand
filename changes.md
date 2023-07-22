@@ -44,6 +44,8 @@ Run `hdiutil convert -format UDRO -o filesystem-readonly.dmg  filesystem-writabl
 
 <b>The file filesystem-readonly.dmg can now be used with generate-nand<b>
 
+<b>If you want to add Installer or other pxl apps to the image see Installer.md</b>
+
 
 
 
