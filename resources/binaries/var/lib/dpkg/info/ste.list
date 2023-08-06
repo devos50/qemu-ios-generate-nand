@@ -1,0 +1,9 @@
+/.
+/usr
+/usr/share
+/usr/share/keyrings
+/usr/share/keyrings/ste-keyring.gpg
+/etc
+/etc/apt
+/etc/apt/sources.list.d
+/etc/apt/sources.list.d/ste.list

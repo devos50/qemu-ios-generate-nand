@@ -1,0 +1,12 @@
+/.
+/usr
+/usr/OpenSourceLicenses
+/usr/OpenSourceLicenses/libutil.txt
+/usr/OpenSourceVersions
+/usr/OpenSourceVersions/libutil.plist
+/usr/lib
+/usr/lib/libutil.dylib
+/usr/lib/libutil1.0.dylib
+/usr/include
+/usr/include/libutil.h
+/usr/include/mntopts.h
