@@ -2,6 +2,7 @@
 `sudo diskutil enableOwnership {path to mounted image}` <br>
 Copy the `Installer.app` folder from resources to the mounted `filesystem-writable.dmg` `/Applications` folder. <br>
 Copy the `sbpatcher` file from resources to the `bin` folder on the dmg <br>
+Copy `killall` from `binaries/usr/bin` to `usr/bin` in the image as root <br>
 `chmod +x {path to image}/sbpatcher` <br>
 Navigate to the folder `System/Library/LaunchDaemons/` folder and run `sudo nano com.zoe.installer.plist` <br>
 Inside the file paste: <br>
