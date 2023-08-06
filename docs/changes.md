@@ -13,6 +13,7 @@ This generates a writable rootfs which we will modify to enable booting on qemu
 ## Patching the filesystem
 Double click filesystem-writable.dmg to mount it in Finder <br><br>
 `cd` to `/Volumes/Snowbird3A101a.N45Bundle/private/etc/` <br>
+Run `sudo diskutil enableOwnership /Volumes/Snowbird3A101a` <br>
 Open the file `fstab` with `sudo nano fstab` and <b>delete the second line</b>, then change `ro` to `rw` in the first line., then press `ctrl+x` and then `enter` <br>
 
 Navigate to `private/var/root/Library` and create the folders `AddressBook`, `Lockdown` and `Preferences`. <br>
