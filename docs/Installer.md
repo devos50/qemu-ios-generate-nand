@@ -1,6 +1,8 @@
 # Adding Installer.app to the filesystem
+`sudo diskutil enableOwnership {path to mounted image}` <br>
 Copy the `Installer.app` folder from resources to the mounted `filesystem-writable.dmg` `/Applications` folder. <br>
 Copy the `sbpatcher` file from resources to the `bin` folder on the dmg <br>
+`chmod +x {path to image}/sbpatcher` <br>
 Navigate to the folder `System/Library/LaunchDaemons/` folder and run `sudo nano com.zoe.installer.plist` <br>
 Inside the file paste: <br>
 
@@ -26,7 +28,7 @@ Then create a new file with `sudo nano installer.sh` <br>
 Inside the file paste:
 
 ```bash
-/bin/springpatch killall SpringBoard && /bin/launchctl stop com.apple.SpringBoard && /bin/launchctl start com.apple.SpringBoard
+/bin/sbpatcher && /usr/bin/killall SpringBoard
 ```
 As usual `ctrl+o` `enter` `ctrl+x` <br>
 Now go ahead and unmount the image and create the nand image with `./generate-nand` as usual.
