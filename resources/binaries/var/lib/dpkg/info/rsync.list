@@ -1,7 +1,0 @@
-/.
-/usr
-/usr/bin
-/usr/bin/rsync
-/etc
-/etc/profile.d
-/etc/profile.d/rsync.sh
