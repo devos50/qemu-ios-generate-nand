@@ -17,7 +17,8 @@
 #define FTL_FORMAT_STRUCT_SIZE  (16)        // packed
 
 #define BAD_MARK_COMPRESS_SIZE 8
-#define VFL_BAD_MAP_TABLE_AVAILABLE_MARK 0xFFF0;
+#define VFL_BAD_MAP_TABLE_AVAILABLE_MARK 0xFFF0   // reserved block that can replace a bad block
+#define VFL_BAD_MAP_TABLE_UNUSABLE_MARK 0xFFFF    // reserved block that can not be used
 
 #define VFL_META_VERSION 0x00000002
 #define VFL_VENDOR_SPECIFIC_TYPE 0x100014

@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <stddef.h>
@@ -8,369 +9,465 @@
 #include "mbr.h"
 #include "gpt.h"
 
+/*
+ * Generates a NAND image for the iPod Touch 2G (4 CEs of Samsung 0xb614d5ad NAND), formatted the way the
+ * VSVFL production format and FTL_Format of the iPhone OS 2.x kernel lay it out. Every written page is stored as
+ * <out>/cs<ce>/<page>.page and holds the page data followed by the spare area. Pages without a file are erased.
+ */
+
 #define BYTES_PER_PAGE 4096
 #define BYTES_PER_SPARE 64
+#define META_SIZE 12                            // the part of the spare area that the FTL/VFL sees
 #define PAGES_PER_BLOCK 128
-#define VFL_CTX_PHYSICAL_PAGE PAGES_PER_BLOCK * 1
-#define PAGES_PER_SUBLOCK 1024
 #define CS_TOTAL 4
+#define BLOCKS_PER_CE 4096
+#define BLOCKS_PER_BANK (BLOCKS_PER_CE / 2)     // the two planes of a CE are exposed as two banks
+#define PAGES_PER_SUBLOCK (PAGES_PER_BLOCK * WMR_NUM_OF_BANKS)
 
-#define NAND_SIG_PAGE 524160
-#define BBT_PAGE      524161
+// VSVFL gives 976 out of every 1024 blocks to the user super blocks, the rest is reserved to replace bad blocks
+#define VFL_NUM_OF_SUBLKS ((0x3d0 * BLOCKS_PER_BANK) / 1024)
+#define VFL_RESERVED_BLOCKS_PER_BANK (BLOCKS_PER_BANK - VFL_NUM_OF_SUBLKS)
 
-#define FTL_CTX_VBLK_IND 0 // virtual block index of the FTL Context
+// the VFL context lives in the first blocks after block 0; these blocks (and block 0) are remapped to reserved blocks
+#define VFL_CXT_BLOCK 1
+
+// ages count down, the context with the lowest age is the newest one
+#define VFL_INITIAL_CXT_AGE 0xFFFFFF00
+#define FTL_INITIAL_CXT_AGE 0xFFFFFFFF
+
+// both the NAND signature and the bad block table are stored in the last block of each CE
+#define SPECIAL_BLOCK (BLOCKS_PER_CE - 1)
+#define NAND_SIG_PAGE (SPECIAL_BLOCK * PAGES_PER_BLOCK)
+#define BBT_PAGE      (SPECIAL_BLOCK * PAGES_PER_BLOCK + 1)
+#define SPECIAL_BLOCK_LEN_OFFSET 0x34
+#define SPECIAL_BLOCK_DATA_OFFSET 0x38
+
+// FTL layout: super blocks 0-2 hold the FTL context, 3-22 are free blocks and the data blocks follow
+#define FTL_DATA_VBN_START (FTL_CXT_SECTION_SIZE + FREE_SECTION_SIZE)
+#define FTL_NUM_OF_LBNS (VFL_NUM_OF_SUBLKS - FTL_DATA_VBN_START)
+#define FTL_CXT_VBN 0
+#define FTL_MAP_TABLE_FIRST_VPN 5
+
+#define FTL_SPARE_TYPE_DATA 0x41
 
 #define NUM_PARTITIONS 1
 #define BOOT_PARTITION_FIRST_PAGE (NUM_PARTITIONS + 2)  // first two LBAs are for MBR and GUID header
+#define DISK_NUM_OF_LBAS ((uint64_t)FTL_NUM_OF_LBNS * PAGES_PER_SUBLOCK)
+
+static const char *out_dir = "nand";
 
 static uint32_t crc32_table[256];
 static int crc32_table_computed = 0;
 
-/*
-CRC32 logic
-*/
+// chip blocks that are replaced by a block in the reserved area of the same plane (block 0 and the VFL info blocks)
+static const uint16_t remapped_blocks[] = { 0, 1, 2, 3, 4 };
+#define NUM_REMAPPED_BLOCKS ((int)(sizeof(remapped_blocks) / sizeof(remapped_blocks[0])))
+
 static void make_crc32_table(void)
 {
     uint32_t c;
     int n, k;
 
     for (n = 0; n < 256; n++) {
-            c = (uint32_t) n;
-            for (k = 0; k < 8; k++) {
-                    if (c & 1)
-                            c = 0xedb88320L ^ (c >> 1);
-                    else
-                            c = c >> 1;
-            }
-            crc32_table[n] = c;
+        c = (uint32_t) n;
+        for (k = 0; k < 8; k++) {
+            if (c & 1)
+                c = 0xedb88320L ^ (c >> 1);
+            else
+                c = c >> 1;
+        }
+        crc32_table[n] = c;
     }
     crc32_table_computed = 1;
 }
 
-uint32_t update_crc32(uint32_t crc, const uint8_t *buf,
-                         int len)
+static uint32_t update_crc32(uint32_t crc, const uint8_t *buf, int len)
 {
     uint32_t c = crc;
     int n;
 
     if (!crc32_table_computed)
-            make_crc32_table();
+        make_crc32_table();
     for (n = 0; n < len; n++) {
-            c = crc32_table[(c ^ buf[n]) & 0xff] ^ (c >> 8);
+        c = crc32_table[(c ^ buf[n]) & 0xff] ^ (c >> 8);
     }
     return c;
 }
 
-uint32_t crc32(const uint8_t *buf, int len)
+static uint32_t crc32(const uint8_t *buf, int len)
 {
     return update_crc32(0xffffffffL, buf, len) ^ 0xffffffffL;
 }
 
-uint8_t *get_valid_ftl_spare() {
-	uint32_t *spare = (uint32_t *)calloc(BYTES_PER_SPARE, sizeof(char));
-	spare[2] = 0x00FF00FF;
-	return (uint8_t *)spare;
-}
-
-void _Helper_ConvertP2C_OneBitReorder(uint32_t dwBank, uint32_t dwPpn, uint32_t* pdwCE, uint32_t* pdwCpn, uint32_t dwReorderMask)
+static void *xcalloc(size_t size)
 {
-    const uint32_t dwBelowReorderMask = dwReorderMask - 1;    // Assumption:  dwReorderMask is a power of 2!
-    const uint32_t dwAboveReorderMask = ~dwBelowReorderMask;
-
-    // insert reorder bit back in correct position of "chip" page number by extracting from MSB of "physical" bank number
-    *pdwCpn = ((dwPpn & dwBelowReorderMask) |
-               (((dwBank / CS_TOTAL) & 0x1) ? dwReorderMask : 0) |
-               ((dwPpn & dwAboveReorderMask) << 1));
-
-    // strip reorder bit from MSB of "physical" bank number to produce "chip" CE
-    *pdwCE = dwBank % CS_TOTAL;
+    void *p = calloc(1, size);
+    if (!p) {
+        perror("calloc");
+        exit(1);
+    }
+    return p;
 }
 
-void _pfnConvertP2C_TwoPlaneLSB(uint32_t dwBank, uint32_t dwPpn, uint32_t* pdwCE, uint32_t* pdwCpn)
+// Returns the chip block that replaces a remapped chip block, or the block itself if it is not remapped.
+// VSVFL takes replacement i of a plane from virtual block wNumOfVFLSuBlk + i of that plane's bank.
+static uint32_t remap_chip_block(uint32_t chip_block)
 {
-    _Helper_ConvertP2C_OneBitReorder(dwBank, dwPpn, pdwCE, pdwCpn, PAGES_PER_BLOCK);
-}
-
-void _ConvertT2P_Default(uint16_t wBank, uint16_t wTbn, uint16_t *pwPbn)
-{
-    uint32_t dwCpn, dwCS;
-    _pfnConvertP2C_TwoPlaneLSB((uint32_t)wBank, (uint32_t)(wTbn * PAGES_PER_BLOCK), &dwCS, &dwCpn);
-    *pwPbn = (uint16_t)(dwCpn / PAGES_PER_BLOCK);
-}
-
-void _Vpn2Ppn(uint32_t dwVpn, uint16_t *pwCS, uint32_t *pdwPpn) {
-	uint16_t wPbn, wPOffset;
-	uint16_t wBank = dwVpn % WMR_NUM_OF_BANKS;
-	uint16_t wVbn = dwVpn / PAGES_PER_SUBLOCK;
-	_ConvertT2P_Default((wBank & 0xffff), wVbn, &wPbn);
-	*pwCS = wBank % CS_TOTAL;
-    wPOffset = (uint16_t)((dwVpn % PAGES_PER_SUBLOCK) / WMR_NUM_OF_BANKS);
-    *pdwPpn = wPbn * PAGES_PER_BLOCK + wPOffset;
-}
-
-void _Lpn2Ppn(uint32_t dwLpn, uint16_t *pwCS, uint32_t *pdwPpn) {
-	uint32_t dwLbn = dwLpn / PAGES_PER_SUBLOCK;
-    uint16_t wLPOffset = (uint16_t)(dwLpn - dwLbn * PAGES_PER_SUBLOCK);
-	uint32_t dwVbn = dwLbn + 1;
-	uint32_t dwVpn = dwVbn * PAGES_PER_SUBLOCK + wLPOffset;
-	_Vpn2Ppn(dwVpn, pwCS, pdwPpn);
-}
-
-void write_page(uint8_t *page, uint8_t *spare, int cs, int page_index) {
-	char filename[100];
-	sprintf(filename, "nand/cs%d", cs);
-	struct stat st = {0};
-	if (stat(filename, &st) == -1) {
-	    mkdir(filename, 0700);
-	}
-
-	sprintf(filename, "nand/cs%d/%d.page", cs, page_index);
-	FILE *f = fopen(filename, "wb");
-
-	if(!page) {
-		page = (uint8_t *)calloc(BYTES_PER_PAGE, sizeof(char));
-	}
-	fwrite(page, sizeof(char), BYTES_PER_PAGE, f);
-
-	if(!spare) {
-		spare = (uint8_t *)calloc(BYTES_PER_SPARE, sizeof(char));
-	}
-	fwrite(spare, sizeof(char), BYTES_PER_SPARE, f);
-
-	fclose(f);
-}
-
-void write_bbts() {
-	// create the bad block table on each CS
-	for(int cs = 0; cs < CS_TOTAL; cs++) {
-		uint8_t *page = calloc(BYTES_PER_PAGE, sizeof(char));
-		memcpy(page, "DEVICEINFOBBT\0\0\0", 16);
-
-		// set all bits in this page to 1, to indicate that all blocks are of good health.
-		for(int i = 16; i < BYTES_PER_PAGE; i++) {
-			page[i] = 0xFF;
-		}
-
-		write_page(page, NULL, cs, BBT_PAGE);
-	}
-}
-
-void write_nand_sig_page() {
-	// write the NAND signature page
-	uint8_t *page = calloc(0x100, sizeof(uint8_t));
-    char *magic = "NANDDRIVERSIGN";
-    memcpy(page, magic, strlen(magic));
-    page[0x34] = 0x4; // length of the info
-
-    // signature (0x43313131)
-    page[0x38] = 0x31;
-    page[0x39] = 0x31;
-    page[0x3A] = 0x31;
-    page[0x3B] = 0x43;
-    write_page(page, NULL, 0, NAND_SIG_PAGE);
-}
-
-void write_vfl_context() {
-	for (int wCSIdx = 0; wCSIdx < CS_TOTAL; wCSIdx++) {
-		// initialize VFL context block on physical block 35, page 0
-		VFLMeta *vfl_meta = (VFLMeta *)calloc(sizeof(VFLMeta), sizeof(char));
-		vfl_meta->dwVersion = VFL_META_VERSION;
-
-		VFLCxt *pVFLCxt = &vfl_meta->stVFLCxt;
-
-		// we set the number of VFL/FTL user blocks to 2048 which doesn't give any room for the BBT table. This is fine as we do not have bad blocks.
-		pVFLCxt->wNumOfVFLSuBlk = 2048;
-		pVFLCxt->wNumOfFTLSuBlk = 2048;
-
-		pVFLCxt->abVSFormtType = VFL_VENDOR_SPECIFIC_TYPE;
-		pVFLCxt->dwGlobalCxtAge = wCSIdx;
-		pVFLCxt->wCxtLocation = 1; // the VFL context is located in the first physical block
-		for (int wIdx = 0; wIdx < FTL_CXT_SECTION_SIZE; wIdx++)
-        {
-            pVFLCxt->awFTLCxtVbn[wIdx] = (uint16_t)(wIdx);
+    uint32_t plane_idx[2] = { 0, 0 };
+    for (int i = 0; i < NUM_REMAPPED_BLOCKS; i++) {
+        uint32_t plane = remapped_blocks[i] & 1;
+        if (remapped_blocks[i] == chip_block) {
+            return (VFL_NUM_OF_SUBLKS + plane_idx[plane]) * 2 + plane;
         }
-        pVFLCxt->wNumOfInitBadBlk = 0;
+        plane_idx[plane]++;
+    }
+    return chip_block;
+}
 
-		for (int wIdx = 0, wPbn = VFL_FIRST_BLK_TO_SEARCH_CXT; wIdx < VFL_INFO_SECTION_SIZE && wPbn < VFL_LAST_BLK_TO_SEARCH_CXT; wPbn++)
-        {
-        	pVFLCxt->awInfoBlk[wIdx++] = wPbn;
+// Converts a virtual page number to a CE and a physical page on that CE, like VSVFL does.
+static void vpn_to_ppn(uint32_t vpn, uint16_t *ce, uint32_t *ppn)
+{
+    uint32_t bank = vpn % WMR_NUM_OF_BANKS;
+    uint32_t vbn = vpn / PAGES_PER_SUBLOCK;
+    uint32_t page_in_block = (vpn % PAGES_PER_SUBLOCK) / WMR_NUM_OF_BANKS;
+
+    // two-plane LSB reordering: the banks >= CS_TOTAL map to the odd blocks of a CE
+    uint32_t chip_block = vbn * 2 + (bank / CS_TOTAL);
+    *ce = bank % CS_TOTAL;
+    *ppn = remap_chip_block(chip_block) * PAGES_PER_BLOCK + page_in_block;
+}
+
+static void lpn_to_ppn(uint32_t lpn, uint16_t *ce, uint32_t *ppn)
+{
+    uint32_t lbn = lpn / PAGES_PER_SUBLOCK;
+    uint32_t vbn = lbn + FTL_DATA_VBN_START;
+    vpn_to_ppn(vbn * PAGES_PER_SUBLOCK + lpn % PAGES_PER_SUBLOCK, ce, ppn);
+}
+
+static void write_page(const uint8_t *page, const uint8_t *meta, int ce, uint32_t page_index) {
+    static const uint8_t zero_page[BYTES_PER_PAGE];
+    char filename[1024];
+    uint8_t spare[BYTES_PER_SPARE];
+
+    snprintf(filename, sizeof(filename), "%s/cs%d", out_dir, ce);
+    if (mkdir(filename, 0700) == -1 && errno != EEXIST) {
+        perror(filename);
+        exit(1);
+    }
+
+    snprintf(filename, sizeof(filename), "%s/cs%d/%u.page", out_dir, ce, page_index);
+    FILE *f = fopen(filename, "wb");
+    if (!f) {
+        perror(filename);
+        exit(1);
+    }
+
+    // the part of the spare area that is not used by the meta data stays erased
+    memset(spare, 0xFF, sizeof(spare));
+    if (meta) {
+        memcpy(spare, meta, META_SIZE);
+    }
+
+    fwrite(page ? page : zero_page, 1, BYTES_PER_PAGE, f);
+    fwrite(spare, 1, BYTES_PER_SPARE, f);
+    fclose(f);
+}
+
+// Writes a page of a data block, with the meta data that FTL_Read and _FTLRestore expect.
+static void write_data_page(const uint8_t *page, uint32_t lpn)
+{
+    uint16_t ce; uint32_t ppn;
+    uint8_t meta[META_SIZE];
+
+    memset(meta, 0xFF, sizeof(meta));   // bytes 8 and 10 must be 0xFF, this is the ECC mark
+    memcpy(meta, &lpn, sizeof(lpn));    // the logical page stored in this page
+    memset(meta + 4, 0, 4);             // write age, older than anything the FTL writes later
+    meta[9] = FTL_SPARE_TYPE_DATA;
+
+    lpn_to_ppn(lpn, &ce, &ppn);
+    write_page(page, meta, ce, ppn);
+}
+
+// Writes a page in the format that the VFL uses for its special blocks: a signature, the data length and the data.
+static void write_special_page(const char *magic, const void *data, uint32_t len, uint32_t page_index)
+{
+    for (int ce = 0; ce < CS_TOTAL; ce++) {
+        uint8_t *page = xcalloc(BYTES_PER_PAGE);
+        memcpy(page, magic, strlen(magic));
+        memcpy(page + SPECIAL_BLOCK_LEN_OFFSET, &len, sizeof(len));
+        memcpy(page + SPECIAL_BLOCK_DATA_OFFSET, data, len);
+        write_page(page, NULL, ce, page_index);
+        free(page);
+    }
+}
+
+static void write_bbts(void) {
+    // all blocks are good; the VFL rebuilds its bad block map from awBadMapTable when it opens the NAND
+    uint8_t bbt[BLOCKS_PER_CE / 8];
+    memset(bbt, 0xFF, sizeof(bbt));
+    write_special_page("DEVICEINFOBBT", bbt, sizeof(bbt), BBT_PAGE);
+}
+
+static void write_nand_sig_page(void) {
+    uint32_t signature = 0x43313131;
+    write_special_page("NANDDRIVERSIGN", &signature, sizeof(signature), NAND_SIG_PAGE);
+}
+
+static void write_vfl_context(void) {
+    for (int ce = 0; ce < CS_TOTAL; ce++) {
+        VFLMeta *vfl_meta = xcalloc(sizeof(VFLMeta));
+        vfl_meta->dwVersion = VFL_META_VERSION;
+
+        VFLCxt *pVFLCxt = &vfl_meta->stVFLCxt;
+        pVFLCxt->dwGlobalCxtAge = ce;
+        pVFLCxt->dwCxtAge = VFL_INITIAL_CXT_AGE;
+        pVFLCxt->wNumOfVFLSuBlk = VFL_NUM_OF_SUBLKS;
+        pVFLCxt->wNumOfFTLSuBlk = VFL_NUM_OF_SUBLKS;
+        pVFLCxt->abVSFormtType = VFL_VENDOR_SPECIFIC_TYPE;
+
+        // the context is written in groups of VFL_NUM_OF_VFL_CXT_COPIES pages to info block wCxtLocation (an index in
+        // awInfoBlk); the next group goes after the first one
+        pVFLCxt->wCxtLocation = 0;
+        pVFLCxt->wNextCxtPOffset = VFL_NUM_OF_VFL_CXT_COPIES;
+        for (int i = 0; i < VFL_INFO_SECTION_SIZE; i++) {
+            pVFLCxt->awInfoBlk[i] = VFL_CXT_BLOCK + i;
+        }
+        for (int i = 0; i < FTL_CXT_SECTION_SIZE; i++) {
+            pVFLCxt->awFTLCxtVbn[i] = FTL_CXT_VBN + i;
         }
 
-        // update the bad block map
-		for(int i = 0; i < WMR_MAX_RESERVED_SIZE; i++) {
-			pVFLCxt->awBadMapTable[i] = VFL_BAD_MAP_TABLE_AVAILABLE_MARK;
-		}
+        // replace the blocks that overlap with the VFL info area by blocks from the reserved area of the same plane
+        for (int i = 0; i < WMR_MAX_RESERVED_SIZE; i++) {
+            pVFLCxt->awBadMapTable[i] = VFL_BAD_MAP_TABLE_AVAILABLE_MARK;
+        }
+        uint16_t plane_idx[2] = { 0, 0 };
+        for (int i = 0; i < NUM_REMAPPED_BLOCKS; i++) {
+            uint16_t plane = remapped_blocks[i] & 1;
+            pVFLCxt->awBadMapTable[plane * VFL_RESERVED_BLOCKS_PER_BANK + plane_idx[plane]] = remapped_blocks[i];
+            plane_idx[plane]++;
+        }
+        pVFLCxt->awReplacementIdx[0] = plane_idx[0];
+        pVFLCxt->awReplacementIdx[1] = plane_idx[1];
+        pVFLCxt->wNumOfInitBadBlk = NUM_REMAPPED_BLOCKS;
 
-		VFLSpare *vfl_ctx_spare = (VFLSpare *)calloc(BYTES_PER_SPARE, sizeof(char));
-		vfl_ctx_spare->dwCxtAge = 1;
-		vfl_ctx_spare->bSpareType = VFL_CTX_SPARE_TYPE;
+        // the last reserved block of the second plane holds the NAND signature and the BBT, never use it as replacement
+        pVFLCxt->awBadMapTable[2 * VFL_RESERVED_BLOCKS_PER_BANK - 1] = VFL_BAD_MAP_TABLE_UNUSABLE_MARK;
 
-		// store some copies of the VFL
-		for (uint8_t wPageIdx = 0; wPageIdx < VFL_NUM_OF_VFL_CXT_COPIES; wPageIdx++) {
-			write_page((uint8_t *)vfl_meta, (uint8_t *)vfl_ctx_spare, wCSIdx, VFL_CTX_PHYSICAL_PAGE + wPageIdx);
-		}
-	}
+        VFLSpare vfl_ctx_spare;
+        memset(&vfl_ctx_spare, 0xFF, sizeof(vfl_ctx_spare));
+        vfl_ctx_spare.dwCxtAge = pVFLCxt->dwCxtAge;
+        vfl_ctx_spare.dwReserved = 0;
+        vfl_ctx_spare.cStatusMark = 0;
+        vfl_ctx_spare.bSpareType = VFL_CTX_SPARE_TYPE;
+
+        for (int i = 0; i < VFL_NUM_OF_VFL_CXT_COPIES; i++) {
+            write_page((uint8_t *)vfl_meta, (uint8_t *)&vfl_ctx_spare, ce, VFL_CXT_BLOCK * PAGES_PER_BLOCK + i);
+        }
+        free(vfl_meta);
+    }
 }
 
-void write_ftl_context() {
-	uint16_t cs;
-	uint32_t ppn;
+static void write_ftl_page(const uint8_t *page, uint32_t vpn)
+{
+    uint16_t ce; uint32_t ppn;
+    VFLSpare spare;
 
-	// set the FTL spare type of the first page of the FTL CXT block to indicate that there is a CTX index
-	VFLSpare *vfl_ctx_spare = (VFLSpare *)calloc(BYTES_PER_SPARE, sizeof(char));
-	vfl_ctx_spare->bSpareType = FTL_SPARE_TYPE_CXT_INDEX;
-	write_page(NULL, (uint8_t *)vfl_ctx_spare, 0, 0);
+    memset(&spare, 0xFF, sizeof(spare));
+    spare.dwCxtAge = FTL_INITIAL_CXT_AGE;
+    spare.dwReserved = 0;
+    spare.bSpareType = FTL_SPARE_TYPE_CXT_INDEX;
 
-	// create the FTL Meta page on the last page of the FTL Cxt block and embed the right versions
-	FTLMeta *ftl_meta = (FTLMeta *)calloc(sizeof(FTLMeta), sizeof(char));
-	ftl_meta->dwVersion = 0x46560000;
-	ftl_meta->dwVersionNot = -0x46560001;
-
-	// initialize the number of empty VBs for logs and the free areas
-	ftl_meta->stFTLCxt.wNumOfFreeVb = FREE_SECTION_SIZE;
-	for(int i = 0; i < FREE_SECTION_SIZE; i++) {
-		ftl_meta->stFTLCxt.awFreeVbList[i] = FREE_SECTION_START + i;
-	}
-
-	// create empty logs
-	for(int i = 0; i < LOG_SECTION_SIZE + 1; i++) {
-		ftl_meta->stFTLCxt.aLOGCxtTable[i].wVbn = 0xFFFF;
-	}
-
-	// prepare the logical block -> virtual block mapping tables
-	for(int i = 0; i < MAX_NUM_OF_MAP_TABLES; i++) {
-		ftl_meta->stFTLCxt.adwMapTablePtrs[i] = i + 5; // the mapping will start from the 2nd page in the FTL context block
-
-		uint16_t *mapping_page = calloc(BYTES_PER_PAGE / sizeof(uint16_t), sizeof(uint16_t));
-		uint32_t items_per_map = BYTES_PER_PAGE / sizeof(uint16_t);
-		for(int ind_in_map = 0; ind_in_map < items_per_map; ind_in_map++) {
-			mapping_page[ind_in_map] = (i * items_per_map) + ind_in_map + 1;
-		}
-		_Vpn2Ppn(i + 5, &cs, &ppn);
-		printf("Writing logical -> virtual block map page %d to physical page %d @ cs %d\n", i, ppn, cs);
-		write_page((uint8_t *)mapping_page, NULL, cs, ppn);
-	}
-
-	vfl_ctx_spare = (VFLSpare *)calloc(BYTES_PER_SPARE, sizeof(char));
-	vfl_ctx_spare->bSpareType = FTL_SPARE_TYPE_CXT_INDEX;
-
-	// we place the FTL Meta on the last page of the first virtual block.
-	_Vpn2Ppn(PAGES_PER_SUBLOCK - 1, &cs, &ppn);
-
-	printf("Writing FTL Meta to physical page %d @ cs %d\n", ppn, cs);
-	write_page((uint8_t *)ftl_meta, (uint8_t *)vfl_ctx_spare, cs, ppn);
+    vpn_to_ppn(vpn, &ce, &ppn);
+    write_page(page, (uint8_t *)&spare, ce, ppn);
 }
 
-uint32_t write_hfs_partition(char *filename, uint32_t page_offset) {
-	// write the HFS+ partition to the first page and update the associated spare
-	uint16_t cs; uint32_t ppn;
+static void write_ftl_context(void) {
+    uint32_t ctx_vpn = FTL_CXT_VBN * PAGES_PER_SUBLOCK;
 
-	FILE *hfs_file = fopen(filename, "rb");
-	fseek(hfs_file, 0L, SEEK_END);
-	int partition_size = ftell(hfs_file);
-	fclose(hfs_file);
+    // the first page of a FTL context block identifies the block (and holds the empty EC/RC/log tables, see below)
+    write_ftl_page(NULL, ctx_vpn);
 
-	hfs_file = fopen(filename, "rb");
-	int lpn = page_offset;
-	uint8_t *spare = get_valid_ftl_spare();
-	uint32_t required_pages_for_partition = partition_size / BYTES_PER_PAGE;
-	printf("Writing HFS partition using %d pages...\n", required_pages_for_partition);
-	for(int i = 0; i < required_pages_for_partition; i++) {
-		uint8_t *page = malloc(BYTES_PER_PAGE);
-		fread(page, BYTES_PER_PAGE, sizeof(uint8_t), hfs_file);
-		_Lpn2Ppn(lpn, &cs, &ppn);
-		printf("Writing HFS partition to physical page %d @ cs %d\n", ppn, cs);
-		write_page(page, spare, cs, ppn);
-		lpn++;
+    FTLMeta *ftl_meta = xcalloc(sizeof(FTLMeta));
+    ftl_meta->dwVersion = 0x46560000;
+    ftl_meta->dwVersionNot = ~ftl_meta->dwVersion;
+    ftl_meta->stFTLCxt.dwAge = FTL_INITIAL_CXT_AGE - 1;
+    ftl_meta->stFTLCxt.dwWriteAge = 1;
 
-		//if(i == 2000) break;
-	}
-	fclose(hfs_file);
+    ftl_meta->stFTLCxt.wNumOfFreeVb = FREE_SECTION_SIZE;
+    for (int i = 0; i < FREE_SECTION_SIZE; i++) {
+        ftl_meta->stFTLCxt.awFreeVbList[i] = FREE_SECTION_START + i;
+    }
 
-	return required_pages_for_partition;
+    for (int i = 0; i < LOG_SECTION_SIZE + 1; i++) {
+        ftl_meta->stFTLCxt.aLOGCxtTable[i].wVbn = 0xFFFF;
+    }
+
+    for (int i = 0; i < FTL_CXT_SECTION_SIZE; i++) {
+        ftl_meta->stFTLCxt.awMapCxtVbn[i] = FTL_CXT_VBN + i;
+    }
+
+    // the logical block -> virtual block mapping tables
+    uint32_t items_per_map = BYTES_PER_PAGE / sizeof(uint16_t);
+    for (uint32_t i = 0; i < MAX_NUM_OF_MAP_TABLES; i++) {
+        uint32_t vpn = ctx_vpn + FTL_MAP_TABLE_FIRST_VPN + i;
+        ftl_meta->stFTLCxt.adwMapTablePtrs[i] = vpn;
+
+        uint16_t *mapping_page = xcalloc(BYTES_PER_PAGE);
+        for (uint32_t ind_in_map = 0; ind_in_map < items_per_map; ind_in_map++) {
+            uint32_t lbn = i * items_per_map + ind_in_map;
+            mapping_page[ind_in_map] = lbn < FTL_NUM_OF_LBNS ? lbn + FTL_DATA_VBN_START : 0xFFFF;
+        }
+        write_ftl_page((uint8_t *)mapping_page, vpn);
+        free(mapping_page);
+    }
+
+    // the erase counter, log context and read counter tables are all zero, so they can all use the first (empty) page
+    for (uint32_t i = 0; i < MAX_NUM_OF_EC_TABLES; i++) {
+        ftl_meta->stFTLCxt.adwECTablePtrs[i] = ctx_vpn;
+        ftl_meta->stFTLCxt.adwRCTablePtrs[i] = ctx_vpn;
+    }
+    for (uint32_t i = 0; i < MAX_NUM_OF_LOGCXT_MAPS; i++) {
+        ftl_meta->stFTLCxt.adwLOGCxtMapPtrs[i] = ctx_vpn;
+    }
+    ftl_meta->stFTLCxt.adwStatPtrs[0] = 0xFFFFFFFF;
+    ftl_meta->stFTLCxt.adwStatPtrs[1] = 0xFFFFFFFF;
+
+    // the FTL meta data goes into the last page of the context block, the FTL searches it backwards from there
+    uint32_t meta_vpn = ctx_vpn + PAGES_PER_SUBLOCK - 1;
+    ftl_meta->stFTLCxt.dwCurrMapCxtPage = meta_vpn;
+    ftl_meta->stFTLCxt.boolFlashCxtIsValid = 1;
+    write_ftl_page((uint8_t *)ftl_meta, meta_vpn);
+    free(ftl_meta);
 }
 
-void write_mbr(int boot_partition_size) {
-	uint16_t cs; uint32_t ppn;
+static uint32_t write_hfs_partition(const char *filename, uint32_t first_lpn) {
+    FILE *hfs_file = fopen(filename, "rb");
+    if (!hfs_file) {
+        perror(filename);
+        exit(1);
+    }
+    fseek(hfs_file, 0L, SEEK_END);
+    long partition_size = ftell(hfs_file);
+    fseek(hfs_file, 0L, SEEK_SET);
 
-	// write the MBR bytes (LBA 0)
-	uint8_t *mbr_page = malloc(BYTES_PER_PAGE);
-	struct mbr_partition *boot_partition = (struct mbr_partition *)(mbr_page + MBR_ADDRESS);
-	boot_partition->sysid = 0xEE;
-	boot_partition->startlba = BOOT_PARTITION_FIRST_PAGE;
-	boot_partition->size = boot_partition_size;
+    uint32_t pages = (partition_size + BYTES_PER_PAGE - 1) / BYTES_PER_PAGE;
+    printf("Writing HFS partition using %u pages...\n", pages);
 
-	mbr_page[510] = 0x55;
-	mbr_page[511] = 0xAA;
+    uint8_t *page = xcalloc(BYTES_PER_PAGE);
+    for (uint32_t i = 0; i < pages; i++) {
+        memset(page, 0, BYTES_PER_PAGE);
+        if (fread(page, 1, BYTES_PER_PAGE, hfs_file) == 0 && ferror(hfs_file)) {
+            perror(filename);
+            exit(1);
+        }
+        write_data_page(page, first_lpn + i);
+    }
+    free(page);
+    fclose(hfs_file);
 
-	_Lpn2Ppn(0, &cs, &ppn);
-	printf("Writing MBR to physical page %d @ cs %d\n", ppn, cs);
-	uint8_t *spare = get_valid_ftl_spare();
-	write_page(mbr_page, spare, cs, ppn);
+    return pages;
 }
 
-void write_filesystem() {
-	uint16_t cs; uint32_t ppn;
+static void write_gpt(const gpt_ent *entry, uint64_t hdr_lba, uint64_t alt_lba, uint64_t table_lba)
+{
+    uint8_t *table_page = xcalloc(BYTES_PER_PAGE);
+    memcpy(table_page, entry, sizeof(gpt_ent));
+    write_data_page(table_page, table_lba);
 
-	int pages_for_boot_partition = write_hfs_partition("filesystem-it2g-readonly.img", BOOT_PARTITION_FIRST_PAGE);
-	printf("Required pages for boot partition: %d\n", pages_for_boot_partition);
+    uint8_t *hdr_page = xcalloc(BYTES_PER_PAGE);
+    gpt_hdr *hdr = (gpt_hdr *)hdr_page;
+    memcpy(hdr->hdr_sig, GPT_HDR_SIG, 8);
+    hdr->hdr_revision = GPT_HDR_REVISION;
+    hdr->hdr_size = 0x5C;
+    hdr->hdr_lba_self = hdr_lba;
+    hdr->hdr_lba_alt = alt_lba;
+    hdr->hdr_lba_start = BOOT_PARTITION_FIRST_PAGE;
+    hdr->hdr_lba_end = DISK_NUM_OF_LBAS - 3;
+    memcpy(hdr->hdr_uuid, "\x6a\x2e\x5c\x10\x9f\x3b\x4e\x41\x8d\x27\x1c\x44\xa5\x10\xe7\x01", 16);
+    hdr->hdr_lba_table = table_lba;
+    hdr->hdr_entries = NUM_PARTITIONS;
+    hdr->hdr_entsz = sizeof(gpt_ent);
+    hdr->hdr_crc_table = crc32((const uint8_t *)entry, sizeof(gpt_ent) * NUM_PARTITIONS);
+    hdr->hdr_crc_self = crc32((uint8_t *)hdr, hdr->hdr_size);
+    write_data_page(hdr_page, hdr_lba);
 
-	// initialize the EFI header (LBA 1)
-	uint8_t *gpt_header_page = malloc(BYTES_PER_PAGE);
-	gpt_hdr *gpt_header = (gpt_hdr *)gpt_header_page;
+    free(table_page);
+    free(hdr_page);
+}
 
-	// create the boot partition entry (LBA 2)
-	uint8_t *gpt_entry_boot_partition_page = malloc(BYTES_PER_PAGE);
-	gpt_ent *gpt_entry_boot_partition = (gpt_ent *)gpt_entry_boot_partition_page;
-	gpt_entry_boot_partition->ent_type[0] = 0x48465300;
-	gpt_entry_boot_partition->ent_type[1] = 0x11AA0000;
-	gpt_entry_boot_partition->ent_type[2] = 0x300011AA;
-	gpt_entry_boot_partition->ent_type[3] = 0xACEC4365;
-	gpt_entry_boot_partition->ent_lba_start = BOOT_PARTITION_FIRST_PAGE;
-	gpt_entry_boot_partition->ent_lba_end = BOOT_PARTITION_FIRST_PAGE + pages_for_boot_partition;
-	printf("Boot system partition located on page %lld - %lld\n", gpt_entry_boot_partition->ent_lba_start, gpt_entry_boot_partition->ent_lba_end);
+static void write_filesystem(const char *fs_image) {
+    uint32_t fs_pages = write_hfs_partition(fs_image, BOOT_PARTITION_FIRST_PAGE);
 
-	_Lpn2Ppn(2, &cs, &ppn);
-	printf("Writing GUID boot partition entry to page %d @ cs %d\n", ppn, cs);
-	uint8_t *spare = get_valid_ftl_spare();
-	write_page(gpt_entry_boot_partition_page, spare, cs, ppn);
+    gpt_ent entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.ent_type[0] = 0x48465300;  // Apple HFS+ (48465300-0000-11AA-AA11-00306543ECAC)
+    entry.ent_type[1] = 0x11AA0000;
+    entry.ent_type[2] = 0x300011AA;
+    entry.ent_type[3] = 0xACEC4365;
+    memcpy(entry.ent_uuid, "\x3c\x1f\x8e\x52\x06\x7d\x4b\x0a\x9b\x61\x2f\x0e\x88\x14\xc3\x5d", 16);
+    entry.ent_lba_start = BOOT_PARTITION_FIRST_PAGE;
+    entry.ent_lba_end = BOOT_PARTITION_FIRST_PAGE + fs_pages - 1;
+    const char *name = "System";
+    for (int i = 0; name[i]; i++) {
+        entry.ent_name[i] = name[i];
+    }
+    printf("Boot system partition located on page %llu - %llu\n", entry.ent_lba_start, entry.ent_lba_end);
 
-	// finalize the GPT header
-	// TODO add the secondary GPT entry!
-	memcpy(gpt_header, GPT_HDR_SIG, 8);
-	gpt_header->hdr_revision = GPT_HDR_REVISION;
-	gpt_header->hdr_size = 0x5C; // 92 bytes
-	gpt_header->hdr_lba_table = 2;
-	gpt_header->hdr_entries = NUM_PARTITIONS;
-	gpt_header->hdr_entsz = 0x80;
-	gpt_header->hdr_crc_table = crc32(gpt_entry_boot_partition_page, sizeof(gpt_ent));
-	gpt_header->hdr_crc_self = crc32((uint8_t *)gpt_header, 0x5C);
+    // the primary GPT at the start of the disk and the backup GPT at the end
+    write_gpt(&entry, 1, DISK_NUM_OF_LBAS - 1, 2);
+    write_gpt(&entry, DISK_NUM_OF_LBAS - 1, 1, DISK_NUM_OF_LBAS - 2);
 
-	_Lpn2Ppn(1, &cs, &ppn);
-	printf("Writing GUID header to page %d @ cs %d\n", ppn, cs);
-	write_page(gpt_header_page, spare, cs, ppn);
+    // The MBR. Its type makes the kernel use the GPT, but iBoot ignores the GPT and mounts the first MBR partition, so
+    // unlike a regular protective MBR the partition covers the system partition only.
+    uint8_t *mbr_page = xcalloc(BYTES_PER_PAGE);
+    struct mbr_partition *protective = (struct mbr_partition *)(mbr_page + MBR_ADDRESS);
+    protective->sysid = 0xEE;
+    protective->startlba = BOOT_PARTITION_FIRST_PAGE;
+    protective->size = fs_pages;
+    mbr_page[510] = 0x55;
+    mbr_page[511] = 0xAA;
+    write_data_page(mbr_page, 0);
+    free(mbr_page);
 
-	// finally, write the MBR
-	write_mbr(pages_for_boot_partition);
+    // When the FTL rebuilds its tables it identifies a data block by the meta data of its last page, so fill up the
+    // last logical block of the filesystem. The last logical block of the disk already ends with the backup GPT header.
+    uint32_t end_lpn = BOOT_PARTITION_FIRST_PAGE + fs_pages;
+    uint32_t pad_end = (end_lpn + PAGES_PER_SUBLOCK - 1) / PAGES_PER_SUBLOCK * PAGES_PER_SUBLOCK;
+    for (uint32_t lpn = end_lpn; lpn < pad_end; lpn++) {
+        write_data_page(NULL, lpn);
+    }
 }
 
 int main(int argc, char *argv[]) {
-	// create the output dir if it does not exist
-	struct stat st = {0};
+    const char *fs_image = "filesystem-it2g-readonly.img";
+    if (argc > 3) {
+        fprintf(stderr, "usage: %s [filesystem image] [output directory]\n", argv[0]);
+        return 1;
+    }
+    if (argc > 1) {
+        fs_image = argv[1];
+    }
+    if (argc > 2) {
+        out_dir = argv[2];
+    }
 
-	if (stat("nand", &st) == -1) {
-	    mkdir("nand", 0700);
-	}
+    struct stat st;
+    if (stat(out_dir, &st) == 0) {
+        fprintf(stderr, "Output directory %s already exists, remove it first\n", out_dir);
+        return 1;
+    }
+    if (mkdir(out_dir, 0700) == -1) {
+        perror(out_dir);
+        return 1;
+    }
 
-	write_vfl_context();
-	write_ftl_context();
-	write_nand_sig_page();
-	write_bbts();
-	write_filesystem();
+    printf("VFL: %d super blocks, %d reserved blocks per bank. FTL: %d logical blocks (%llu pages)\n",
+           VFL_NUM_OF_SUBLKS, VFL_RESERVED_BLOCKS_PER_BANK, FTL_NUM_OF_LBNS, DISK_NUM_OF_LBAS);
 
-	// testing
-	uint32_t num = 49188;
-	uint16_t cs; uint32_t ppn;
-	_Lpn2Ppn(num, &cs, &ppn);
-	printf("LPN %d => %d, cs %d\n", num, ppn, cs);
+    write_vfl_context();
+    write_ftl_context();
+    write_nand_sig_page();
+    write_bbts();
+    write_filesystem(fs_image);
+    return 0;
 }
