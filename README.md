@@ -68,6 +68,13 @@ The current image has these launch daemons added back:
   in the static trust cache, i.e. not about the stock system binaries.
 - `mediaserverd`: the audio server (AudioQueue, RemoteIO, system sounds). No
   sound plays without it.
+- `CrashHousekeeping`: runs once at boot and tidies the crash logs that
+  `ReportCrash` writes.
+- `AddressBook` (`ABDatabaseDoctor`): checks the Contacts database, on demand.
+- `daily`: periodic cleanup, once a day.
+
+`com.apple.aslmanager.plist` is left out: iOS 2.1.1 ships it without the
+`/usr/sbin/aslmanager` binary.
 
 The image also has an SSH server and a shell, from the Telesphoreo repository
 (`apt.saurik.com/dists/tangelo-0.9`), which targets iPhoneOS 2:
@@ -91,7 +98,9 @@ iOS 2.1.1 has no dyld shared cache, so the file on disk is what gets loaded.
 
 `filesystem-it2g-writable.pre-ssh.dmg` is the image before OpenSSH was added,
 `filesystem-it2g-writable.pre-bash.dmg` the one before the shell and
-`filesystem-it2g-writable.pre-libgcc.dmg` the one with the stock `libgcc_s`.
+`filesystem-it2g-writable.pre-libgcc.dmg` the one with the stock `libgcc_s`
+and `filesystem-it2g-writable.pre-housekeeping.dmg` the one before
+`CrashHousekeeping`, `AddressBook` and `daily`.
 `filesystem-it2g-writable.pre-daemons.dmg` is the image with only `usbptpd` and
 `syslogd` added. `filesystem-it2g-writable.pre-mediaserverd.dmg` is the
 image before `mediaserverd` was added.
