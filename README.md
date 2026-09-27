@@ -69,6 +69,29 @@ The current image has these launch daemons added back:
 - `mediaserverd`: the audio server (AudioQueue, RemoteIO, system sounds). No
   sound plays without it.
 
+The image also has an SSH server and a shell, from the Telesphoreo repository
+(`apt.saurik.com/dists/tangelo-0.9`), which targets iPhoneOS 2:
+
+- OpenSSH 5.2p1 (`sshd`, `ssh`, `scp`, `ssh-keygen`, `sftp-server`) with
+  `libcrypto` from OpenSSL 0.9.8k, and `com.openssh.sshd.plist` starting
+  `sshd -i` on demand. There is a pre-generated RSA host key; `sshd_config`
+  only lists that key.
+- bash 3.2 (also `/bin/sh`, which OpenSSH needs as the login shell of root and
+  mobile), readline, ncurses (a few terminfo entries), `libintl` from gettext,
+  coreutils 6.9 and a minimal `/etc/profile`.
+
+Connect over USB with `iproxy 2222 22` and
+`ssh -p 2222 -o HostKeyAlgorithms=+ssh-rsa -o KexAlgorithms=+diffie-hellman-group14-sha1 root@127.0.0.1`
+(password `alpine`).
+
+`/usr/lib/libgcc_s.1.dylib` is replaced by the one from Telesphoreo's `libgcc`
+package. It exports everything the stock one does, plus `___floatundidf` and a
+few other conversions that coreutils (`df`, `du`, `ls -h`, `sort`, `dd`) need.
+iOS 2.1.1 has no dyld shared cache, so the file on disk is what gets loaded.
+
+`filesystem-it2g-writable.pre-ssh.dmg` is the image before OpenSSH was added,
+`filesystem-it2g-writable.pre-bash.dmg` the one before the shell and
+`filesystem-it2g-writable.pre-libgcc.dmg` the one with the stock `libgcc_s`.
 `filesystem-it2g-writable.pre-daemons.dmg` is the image with only `usbptpd` and
 `syslogd` added. `filesystem-it2g-writable.pre-mediaserverd.dmg` is the
 image before `mediaserverd` was added.

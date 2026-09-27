@@ -8,6 +8,8 @@ root:wheel, without needing sudo.
 (.img). Each <path> is absolute inside the filesystem, e.g.
 /System/Library/LaunchDaemons/com.apple.syslogd.plist, and is copied from the
 same path below <source root> (e.g. a mounted original filesystem).
+Missing parent directories are created and made root-owned as well.
+Symbolic links are copied as links.
 
 macOS mounts the image with ownership ignored, so copied files end up owned
 by the current user, and launchd skips daemons that are not owned by root.
@@ -25,6 +27,8 @@ import time
 
 # HFSPlusCatalogFile: recordType, flags, reserved, fileID, 5 dates, then
 # HFSPlusBSDInfo with ownerID and groupID.
+# HFSPlusCatalogFolder has the same layout up to the BSD info.
+FOLDER_RECORD = 1
 FILE_RECORD = 2
 OWNER_OFFSET = 0x20
 
@@ -46,17 +50,17 @@ def detach(mountpoint):
 
 
 def chown_root(image, entries):
-    """entries: list of (file name, parent directory node ID)."""
+    """entries: list of (name, parent directory node ID, record type)."""
     with open(image, "r+b") as f:
         data = bytearray(f.read())
-        for name, parent in entries:
+        for name, parent, record_type in entries:
             uname = name.encode("utf-16-be")
             key = struct.pack(">HIH", 6 + len(uname), parent, len(name)) + uname
             matches = []
             pos = data.find(key)
             while pos != -1:
                 rec = pos + len(key)
-                if struct.unpack_from(">H", data, rec)[0] == FILE_RECORD:
+                if struct.unpack_from(">H", data, rec)[0] == record_type:
                     matches.append(rec)
                 pos = data.find(key, pos + 1)
             # Unused B-tree node space can hold stale copies of a record, so
@@ -82,10 +86,22 @@ def main():
         for path in paths:
             src = os.path.join(source_root, path.lstrip("/"))
             dst = os.path.join(mountpoint, path.lstrip("/"))
-            if not os.path.isfile(src):
+            if not (os.path.isfile(src) or os.path.islink(src)):
                 raise SystemExit("not a file: %s" % src)
-            shutil.copy2(src, dst)
-            entries.append((os.path.basename(path), os.stat(os.path.dirname(dst)).st_ino))
+            missing = []
+            parent = os.path.dirname(dst)
+            while not os.path.isdir(parent):
+                missing.append(parent)
+                parent = os.path.dirname(parent)
+            for directory in reversed(missing):
+                os.mkdir(directory, 0o755)
+                entries.append((os.path.basename(directory),
+                                os.stat(os.path.dirname(directory)).st_ino, FOLDER_RECORD))
+            if os.path.lexists(dst) and os.path.islink(src):
+                os.remove(dst)
+            shutil.copy2(src, dst, follow_symlinks=False)
+            # Symlinks are file records too.
+            entries.append((os.path.basename(path), os.stat(os.path.dirname(dst)).st_ino, FILE_RECORD))
     finally:
         detach(mountpoint)
         os.rmdir(mountpoint)
