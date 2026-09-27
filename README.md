@@ -42,6 +42,23 @@ For me, partition 5 is the one I need to convert. Now convert the image with the
 dmg2img -p 5 filesystem-it2g-readonly.dmg
 ```
 
+# Adding files from the original filesystem
+
+`add_files.py` copies files into the writable DMG (or a raw `.img`) and makes
+them owned by root:wheel without sudo, which launchd requires for launch
+daemons. Run it before converting the DMG, with the original filesystem
+mounted, e.g.:
+
+```
+python3 add_files.py filesystem-it2g-writable.dmg /Volumes/<original> \
+    /System/Library/LaunchDaemons/com.apple.usbptpd.plist \
+    /System/Library/LaunchDaemons/com.apple.syslogd.plist
+```
+
+The current image has these two launch daemons added back: `usbptpd` (ptpd
+must register the PTP interface before the kernel goes on the USB bus) and
+`syslogd` (needed by lockdown's syslog_relay service, e.g. `idevicesyslog`).
+
 # Generating the NAND Image
 
 
