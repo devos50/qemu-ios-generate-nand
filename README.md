@@ -66,9 +66,12 @@ The current image has these launch daemons added back:
 - `mDNSResponder` and `mDNSResponderHelper`: DNS and Bonjour.
 - `MobileFileIntegrity` (amfid): the kernel asks it about binaries that are not
   in the static trust cache, i.e. not about the stock system binaries.
+- `mediaserverd`: the audio server (AudioQueue, RemoteIO, system sounds). No
+  sound plays without it.
 
 `filesystem-it2g-writable.pre-daemons.dmg` is the image with only `usbptpd` and
-`syslogd` added.
+`syslogd` added. `filesystem-it2g-writable.pre-mediaserverd.dmg` is the
+image before `mediaserverd` was added.
 
 # Generating the NAND Image
 
