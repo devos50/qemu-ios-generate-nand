@@ -21,6 +21,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 # HFSPlusCatalogFile: recordType, flags, reserved, fileID, 5 dates, then
 # HFSPlusBSDInfo with ownerID and groupID.
@@ -36,6 +37,11 @@ def attach(image, mountpoint):
 
 
 def detach(mountpoint):
+    # Spotlight or fseventsd can briefly keep a fresh mount busy.
+    for _ in range(5):
+        if subprocess.run(["hdiutil", "detach", mountpoint], stdout=subprocess.DEVNULL).returncode == 0:
+            return
+        time.sleep(1)
     subprocess.run(["hdiutil", "detach", mountpoint], check=True, stdout=subprocess.DEVNULL)
 
 
