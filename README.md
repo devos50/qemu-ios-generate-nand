@@ -55,9 +55,20 @@ python3 add_files.py filesystem-it2g-writable.dmg /Volumes/<original> \
     /System/Library/LaunchDaemons/com.apple.syslogd.plist
 ```
 
-The current image has these two launch daemons added back: `usbptpd` (ptpd
-must register the PTP interface before the kernel goes on the USB bus) and
-`syslogd` (needed by lockdown's syslog_relay service, e.g. `idevicesyslog`).
+The current image has these launch daemons added back:
+
+- `usbptpd`: ptpd must register the PTP interface before the kernel goes on the
+  USB bus.
+- `syslogd`: needed by lockdown's syslog_relay service, e.g. `idevicesyslog`.
+- `update`: syncs the filesystem every 30 seconds, so files survive when QEMU
+  is killed.
+- `securityd`: the keychain, started on demand (Safari, Mail).
+- `mDNSResponder` and `mDNSResponderHelper`: DNS and Bonjour.
+- `MobileFileIntegrity` (amfid): the kernel asks it about binaries that are not
+  in the static trust cache, i.e. not about the stock system binaries.
+
+`filesystem-it2g-writable.pre-daemons.dmg` is the image with only `usbptpd` and
+`syslogd` added.
 
 # Generating the NAND Image
 
