@@ -5,6 +5,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <stddef.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include "vfl.h"
 #include "mbr.h"
 #include "gpt.h"
@@ -438,17 +440,65 @@ static void write_filesystem(const char *fs_image) {
     }
 }
 
+// Writes a whole disk image (logical page n at offset n * BYTES_PER_PAGE), e.g. one that nand_disk.py extracted from a
+// NAND. Only the logical blocks that hold data are written, each of them completely, since the FTL identifies a data
+// block by the meta data of its last page when it rebuilds its tables. The holes of a sparse image are skipped.
+static void write_disk(const char *disk_image) {
+    int fd = open(disk_image, O_RDONLY);
+    if (fd == -1) {
+        perror(disk_image);
+        exit(1);
+    }
+    off_t size = lseek(fd, 0, SEEK_END);
+    if (size > (off_t)DISK_NUM_OF_LBAS * BYTES_PER_PAGE) {
+        fprintf(stderr, "%s is larger than the disk (%llu pages)\n", disk_image, DISK_NUM_OF_LBAS);
+        exit(1);
+    }
+
+    off_t block_size = (off_t)PAGES_PER_SUBLOCK * BYTES_PER_PAGE;
+    uint8_t *page = xcalloc(BYTES_PER_PAGE);
+    uint32_t blocks = 0;
+    off_t pos = 0;
+    while (pos < size) {
+        off_t data = lseek(fd, pos, SEEK_DATA);
+        if (data == -1) {
+            break;  // only a hole remains
+        }
+        uint32_t lbn = data / block_size;
+        for (uint32_t i = 0; i < PAGES_PER_SUBLOCK; i++) {
+            uint32_t lpn = lbn * PAGES_PER_SUBLOCK + i;
+            memset(page, 0, BYTES_PER_PAGE);
+            if (pread(fd, page, BYTES_PER_PAGE, (off_t)lpn * BYTES_PER_PAGE) == -1) {
+                perror(disk_image);
+                exit(1);
+            }
+            write_data_page(page, lpn);
+        }
+        blocks++;
+        pos = (off_t)(lbn + 1) * block_size;
+    }
+    printf("Wrote %u logical blocks of %s\n", blocks, disk_image);
+    free(page);
+    close(fd);
+}
+
 int main(int argc, char *argv[]) {
     const char *fs_image = "filesystem-it2g-readonly.img";
-    if (argc > 3) {
-        fprintf(stderr, "usage: %s [filesystem image] [output directory]\n", argv[0]);
+    const char *disk_image = NULL;
+    int arg = 1;
+    if (argc > 1 && strcmp(argv[1], "--disk") == 0) {
+        disk_image = argc > 2 ? argv[2] : NULL;
+        arg = 3;
+    }
+    if (argc > arg + 2 || (arg == 3 && !disk_image)) {
+        fprintf(stderr, "usage: %s [filesystem image | --disk <disk image>] [output directory]\n", argv[0]);
         return 1;
     }
-    if (argc > 1) {
-        fs_image = argv[1];
+    if (argc > arg && !disk_image) {
+        fs_image = argv[arg++];
     }
-    if (argc > 2) {
-        out_dir = argv[2];
+    if (argc > arg) {
+        out_dir = argv[arg];
     }
 
     struct stat st;
@@ -468,6 +518,10 @@ int main(int argc, char *argv[]) {
     write_ftl_context();
     write_nand_sig_page();
     write_bbts();
-    write_filesystem(fs_image);
+    if (disk_image) {
+        write_disk(disk_image);
+    } else {
+        write_filesystem(fs_image);
+    }
     return 0;
 }

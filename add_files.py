@@ -17,6 +17,7 @@ After unmounting, this script sets the owner and group in each file's HFS+
 catalog record to 0. It only touches records whose parent is the destination
 directory, which it identifies by its catalog node ID (the inode number).
 """
+import mmap
 import os
 import shutil
 import struct
@@ -51,8 +52,8 @@ def detach(mountpoint):
 
 def chown_root(image, entries):
     """entries: list of (name, parent directory node ID, record type)."""
-    with open(image, "r+b") as f:
-        data = bytearray(f.read())
+    with open(image, "r+b") as f, mmap.mmap(f.fileno(), 0) as data:
+        # Mapped rather than read, so that large (sparse) partition images do not have to fit in memory.
         for name, parent, record_type in entries:
             uname = name.encode("utf-16-be")
             key = struct.pack(">HIH", 6 + len(uname), parent, len(name)) + uname
@@ -70,8 +71,7 @@ def chown_root(image, entries):
             for rec in matches:
                 struct.pack_into(">II", data, rec + OWNER_OFFSET, 0, 0)
             print("%s: root:wheel (%d record%s)" % (name, len(matches), "s" if len(matches) > 1 else ""))
-        f.seek(0)
-        f.write(data)
+        data.flush()
 
 
 def main():
